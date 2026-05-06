@@ -1,0 +1,33 @@
+{
+  "name": "bkcavilee",
+  "owner": {
+    "name": "Brandon Cavilee",
+    "url": "https://github.com/bkcavilee-hue"
+  },
+  "metadata": {
+    "description": "Brandon's Claude Code plugins — autonomous project agents and execution helpers.",
+    "version": "1.1.0"
+  },
+  "plugins": [
+    {
+      "name": "autonomous-project-agent",
+      "source": "./autonomous-project-agent",
+      "description": "End-to-end project agent: classifies, researches, plans, and ships projects through gated phases with audits, a five-layer authentication security gate, an autopilot mode for unattended runs, and an append-only error-mitigation loop that learns from past failures.",
+      "version": "1.1.0",
+      "author": {
+        "name": "Brandon Cavilee",
+        "url": "https://github.com/bkcavilee-hue"
+      },
+      "category": "automation",
+      "keywords": [
+        "agent",
+        "project",
+        "planning",
+        "autonomous",
+        "firebase",
+        "auth-security",
+        "error-mitigation"
+      ]
+    }
+  ]
+}
