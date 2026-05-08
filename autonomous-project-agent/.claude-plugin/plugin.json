@@ -1,20 +1,8 @@
 {
   "name": "autonomous-project-agent",
-  "version": "1.1.0",
-  "description": "End-to-end project agent: classifies, researches, plans, and ships projects through gated phases with audits, a five-layer authentication security gate, an autopilot mode for unattended runs, and an append-only error-mitigation loop that learns from past failures.",
+  "version": "1.2.0",
+  "description": "End-to-end project agent: classifies, researches, plans, and ships projects through gated phases with audits, a five-layer authentication security gate, an autopilot mode for unattended runs, an append-only error-mitigation loop, autonomous Firebase CLI bootstrap, local-only Anthropic API key auto-discovery, and multi-agent orchestration capped by a diminishing-returns heuristic.",
   "author": {
-    "name": "Brandon Cavilee",
-    "url": "https://github.com/bkcavilee-hue"
-  },
-  "homepage": "https://github.com/bkcavilee-hue/autonomous-project-agent",
-  "repository": "https://github.com/bkcavilee-hue/autonomous-project-agent",
-  "keywords": [
-    "agent",
-    "project",
-    "planning",
-    "autonomous",
-    "firebase",
-    "auth-security",
-    "error-mitigation"
-  ]
+    "name": "Brandon"
+  }
 }

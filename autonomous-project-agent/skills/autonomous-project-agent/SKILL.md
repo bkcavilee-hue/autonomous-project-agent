@@ -31,6 +31,12 @@ On entering autopilot mode, the skill must briefly acknowledge: *"Autopilot mode
 ### Exiting autopilot mode
 Autopilot mode persists for the rest of the run unless the user says **"stop"**, **"pause"**, **"wait"**, or asks a direct question. On exit, the skill returns to normal gated behavior at the next phase boundary.
 
+### Companion skills active in autopilot
+The following sibling skills (added in v1.2.0) run autonomously inside autopilot mode without inserting their own approval pauses:
+- **`firebase-bootstrap`** — verifies Firebase CLI, authenticates, selects or creates the Firebase project, sets dev/staging/prod aliases, logs project + service URLs to `<project>/ai_docs/links.md`. Hard-blocks deployment if Firebase isn't usable.
+- **`anthropic-key-locator`** — when the project consumes the Anthropic API, searches local files only for an existing `ANTHROPIC_API_KEY`, auto-copies it into the new project's `.env`, and logs only the source path (never the key value) to `links.md` Credentials Inventory.
+- **`multi-agent-orchestrator`** — fans out independent subtasks to parallel sub-agents inside each phase, capped by a diminishing-returns heuristic (max 6, throttled on rate limits / merge conflicts / redundant work). Each parallel agent runs in an isolated git worktree.
+
 ---
 
 ## Core purpose
@@ -62,6 +68,7 @@ The skill begins only after the user provides the initial project idea and the s
 - Security or compliance concerns.
 - Deployment target.
 - Existing assets or constraints.
+- Firebase project preference (existing project ID, or 'create new'). *(Added in v1.2.0; consumed by the `firebase-bootstrap` skill at the resource-gathering gate.)*
 
 ### Intake rule
 If critical information is missing, the skill must ask targeted follow-up questions before moving forward.
