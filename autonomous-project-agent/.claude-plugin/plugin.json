@@ -1,7 +1,7 @@
 {
   "name": "autonomous-project-agent",
-  "version": "1.2.0",
-  "description": "End-to-end project agent: classifies, researches, plans, and ships projects through gated phases with audits, a five-layer authentication security gate, an autopilot mode for unattended runs, an append-only error-mitigation loop, autonomous Firebase CLI bootstrap, local-only Anthropic API key auto-discovery, and multi-agent orchestration capped by a diminishing-returns heuristic.",
+  "version": "1.3.0",
+  "description": "Single-skill autonomous project agent: end-to-end workflow with phased gates, six-layer security gate (five auth layers + general security audit), Firebase + React + React Context default stack, free-tier-first cost analysis, autopilot mode, and four embedded subsystems (error mitigation loop, Firebase CLI bootstrap, local-only Anthropic API key locator, multi-agent orchestrator with diminishing-returns cap).",
   "author": {
     "name": "Brandon"
   }
