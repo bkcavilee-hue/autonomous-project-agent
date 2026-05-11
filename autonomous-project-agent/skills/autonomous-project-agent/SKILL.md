@@ -4,7 +4,7 @@ description: 'Use this skill autonomously whenever the user describes a project 
 ---
 
 # Autonomous Project Research-to-Completion Skill
-### Version 3 — Single-skill consolidation: full workflow + error mitigation + Firebase bootstrap + Anthropic key locator + multi-agent orchestration + default stack + cost analysis + general security audit
+### Version 4 (v1.4.0) — Adds Boot Sequence (constraint-loading + resume), Plan-Preview gate, test-first phasing, reference-mode Anthropic key wiring, honest multi-agent reality, run-state checkpointing, anti-pattern catalog
 
 ---
 
@@ -15,6 +15,32 @@ This skill takes a user's initial project articulation, identifies what kind of 
 The skill is **project-specific**, not generic. It must automatically determine which research, structure, logic, execution, and resource-gathering steps apply based on the project type chosen or detected. It must not force irrelevant sections onto the project.
 
 This skill embeds four subsystems that run autonomously throughout every workflow: an append-only error-mitigation loop, an autonomous Firebase CLI bootstrap, a local-only Anthropic API key locator, and a multi-agent orchestrator that fans out independent subtasks under a diminishing-returns cap. All four are sections inside this document (Sections 20–23). They are not separate skills.
+
+---
+
+## Boot sequence *(runs before every other section)*
+
+**The very first tool call when this skill activates MUST be a `Read` of the plugin-level constraints file**, if it exists:
+
+```
+Read("<plugin-root>/skills/autonomous-project-agent/constraints.md")
+```
+
+If the file exists, load every active constraint into working context. Each constraint is a pre-check that has been promoted from a past error (per Section 20.4) and MUST be honored before its trigger phase completes. This is how the skill consumes its own institutional memory.
+
+If the file does not exist (fresh install, no prior runs have promoted constraints yet), continue normally — there's nothing to load.
+
+**The second tool call MUST check for a resumable run state** in the current working directory:
+
+```
+Read("<project>/ai_docs/run-state.json")
+```
+
+If `run-state.json` exists and its `status` is `in-progress`, this is a resumed run — pick up at the phase named in `next_phase`, with the prior `resource_manifest_path` and `cost_manifest_path` loaded. See Section 24 for run-state semantics.
+
+If `run-state.json` does not exist or its `status` is `completed` or `aborted`, this is a fresh run — proceed to Section 0.
+
+These two reads are **mandatory** at the very start of every activation. They are not subject to autopilot's "skip approval pauses" rule because they don't require user approval — they're just file reads.
 
 ---
 
@@ -114,6 +140,47 @@ After intake, the skill must classify the project.
 
 ### Detection rule
 The skill must identify what the project actually needs before researching deeply. It must not assume every project needs the same research depth, structure, or execution path.
+
+---
+
+## 2a) Plan-preview gate *(new in v1.4.0)*
+
+Between project detection and resource-gathering, the skill emits a **single one-page plan preview** and asks for one approval. This is the only user-approval moment in the entire workflow. After this, the skill runs end-to-end without pauses (except the unavoidable Firebase OAuth login in §21).
+
+### The plan preview must contain
+
+- **Project summary:** one paragraph restating what's being built, in the skill's own words.
+- **Detected category, scope, complexity, risk tier.**
+- **Recommended stack** (Section 19) — what the skill will use unless overridden.
+- **Phase plan:** the workflow phases that will run (intake done → resource-gathering → research → ... → deploy). Brief.
+- **Projected cost summary:** the Cost Manifest's headline numbers — `$0 at projected light usage; first paid charge would land at ~X MAU.`
+- **Security posture summary:** which security gate layers will run and which findings would be auto-BLOCK.
+- **Estimated wall-time and rough effort** ("12–18 tool calls, ~Z minutes if uninterrupted").
+- **Known assumptions** that will be logged to the Resource Manifest if not overridden.
+
+### The single approval moment
+
+After emitting the preview, the skill asks **one** question:
+
+> *"Proceed with this plan? Reply OK to run end-to-end. Reply with overrides (e.g. 'use postgres', 'skip auth gate', 'state with zustand') to adjust before kickoff."*
+
+### Approval outcomes
+
+- **"OK" / "yes" / "proceed" / "go"** → run end-to-end with no further pauses. This is the path autopilot mode takes by default.
+- **Overrides specified** → apply the overrides to the Resource Manifest as pinned decisions (per §I-style overrides), re-emit the preview once with the changes incorporated, ask again.
+- **"stop" / "cancel" / "no"** → abort the run cleanly, no artifacts written, no Firebase project created.
+
+### Autopilot interaction
+
+In autopilot mode (Section 0), the skill **still emits the plan preview** but auto-approves and proceeds after a brief acknowledgment:
+
+> *"Plan preview above. Autopilot mode is engaged — proceeding end-to-end. Reply 'stop' to abort before the next tool call."*
+
+This gives the user a single chance to catch a wildly wrong plan before the run goes silent for the next 30+ minutes. Even autopilot benefits from this checkpoint.
+
+### Why this gate exists
+
+Per-phase approvals (the v1.3.0 default) generate either approval-fatigue (12 confirmations per run) or full silence (autopilot, never asks). Neither is right. One informed plan-time approval, then unattended, is the actually-useful UX. This gate compresses that intent into a single moment.
 
 ---
 
@@ -441,6 +508,25 @@ Every phase must be validated before the next phase begins.
 - BLOCK.
 
 If a phase fails twice, the skill must stop and surface the failure with remediations.
+
+### Test-first ordering within code-mutating phases *(new in v1.4.0)*
+
+For any phase that mutates code (scaffolding, build, integration, fixes), the **default order is test-first**:
+
+1. **Write the characterization test FIRST.** Describe the expected behavior as a failing test.
+2. **Run the test.** Confirm it fails for the expected reason (not for an unrelated setup error). A test that passes immediately means the test isn't actually exercising the behavior.
+3. **Write the minimum code to make it pass.** Resist the urge to add adjacent functionality.
+4. **Run the test again.** Confirm it now passes.
+5. **Run the broader suite.** Confirm nothing else broke.
+6. **Refactor if useful.** Keep the test green throughout.
+
+This is the default. Exceptions where test-first is skipped:
+
+- Pure UI scaffolding with no behavior to test yet (still write a render test).
+- One-line config changes.
+- Generated boilerplate (e.g. `vite create`) where the framework provides its own scaffold validation.
+
+When test-first is skipped, log the reason as an assumption in the Resource Manifest.
 
 ---
 
@@ -1033,22 +1119,35 @@ Deployment cannot proceed if ANY of the following is true after one auto-remedia
 
 ---
 
-## 22) Anthropic API key locator *(embedded subsystem, was a separate skill in v1.2.0)*
+## 22) Anthropic API key locator *(rewritten in v1.4.0 — reference-mode, not copy-mode)*
 
-When a project the agent is building needs to call the Anthropic API (i.e. the project itself uses Claude, separate from Claude Code the harness), this subsystem locates an existing `ANTHROPIC_API_KEY` from prior local projects and wires it into the new project's `.env` automatically. Never asks for paste, never logs the key value, never queries any remote service.
+When a project the agent is building needs to call the Anthropic API (i.e. the project itself uses Claude, separate from Claude Code the harness), this subsystem locates an existing `ANTHROPIC_API_KEY` from prior local projects and wires it into the new project **by reference, not by value**. The key value lives in exactly one place on disk; every project that needs it references that one path. Never asks for paste, never logs the key value, never queries any remote service.
 
-### 22.0) Autonomy contract
+### 22.0) Design principle — reference, not copy
 
-Runs **autonomously** during Section 3 (resource-gathering) when the project type or stack indicates Anthropic SDK use. Auto-copies on find, no prompts.
+The v1.2.0/v1.3.0 design copied the key VALUE into each project's `.env`. That works, but it scatters the credential across every project on disk and creates as many leakage paths as there are repos. v1.4.0 changes the model:
+
+**One canonical keystore.** `~/.anthropic/api-key`, mode `0600` (owner read/write only). The key value lives here, once.
+
+**Every project references it.** New projects get `ANTHROPIC_API_KEY_FILE=$HOME/.anthropic/api-key` in `.env.local` and a tiny resolver script that reads from that path at runtime.
+
+**Multiple safety walls.** `.gitignore` enforcement, `git check-ignore` verification (abort if not ignored), pre-commit hook that blocks any commit containing an `sk-ant-` pattern, and production deploys that use Firebase Functions secrets rather than bundled values.
+
+**Effect:** rotating the key means editing one file. Leaking a project's `.env.local` leaks a *path*, not a credential. Even an accidental `git add .env.local` would be caught by the pre-commit hook before the value could escape — and even if it did, the value isn't in `.env.local`, only the path is.
+
+### 22.1) Autonomy contract
+
+Runs **autonomously** during Section 3 (resource-gathering) when the project type or stack indicates Anthropic SDK use. Auto-canonicalizes on find. Auto-wires the new project by reference. No prompts.
 
 **Hard limits:**
 - **Local filesystem reads only.** Never queries the Anthropic console, never makes any network call to discover keys.
 - **Never logs the key value.** Logs only file paths, last-4 character previews (e.g. `sk-ant-…AB12`), and discovery timestamps.
-- **Never overwrites an existing `.env` line.** If the new project's `.env` already has `ANTHROPIC_API_KEY`, leaves it alone and logs the find as an alternate.
-- **Never copies a key to a shared/committed file.** Writes only to `.env` (assumed gitignored).
-- **Never uses or sends the key.** Discovery and wiring only.
+- **Never writes the key value to any project file.** Project files contain only the *path* to the canonical keystore.
+- **The single exception:** writes the key value once to `~/.anthropic/api-key` (mode 0600) if it isn't already there. That file is the keystore; the discovered key originated from another file on the same machine, so this is canonicalization, not duplication.
+- **Abort if `.gitignore` enforcement fails.** If `git check-ignore .env.local` does not return success after the gitignore is updated, abort the entire wire-up and surface the failure to Section 20.
+- **Cross-platform:** macOS and Linux only in v1.4.0. Windows is unsupported (different credential paradigm — surfaces a note in the Resource Manifest if detected).
 
-### 22.1) Activation triggers
+### 22.2) Activation triggers
 
 Activates when ANY of:
 - Resource Manifest has `@anthropic-ai/sdk`, `anthropic` (Python), or any Anthropic API client in HAVE or NEED.
@@ -1058,7 +1157,10 @@ Activates when ANY of:
 
 Does **not** activate for projects that only use Claude Code (the harness has its own auth).
 
-### 22.2) Search locations (read-only)
+### 22.3) Search locations (read-only)
+
+**Canonical store first (fast path):**
+- `~/.anthropic/api-key` — if this exists and contains a valid `sk-ant-…` key, use it directly and skip the full scan.
 
 **Shell environment files:**
 - `~/.zshrc`, `~/.zprofile`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.config/fish/config.fish`
@@ -1076,174 +1178,413 @@ For files matching `.env`, `.env.local`, `.env.development`, `.env.production`, 
 - Inside `node_modules/`, `.git/objects/`, `vendor/`, `dist/`, `build/`, `.next/`, `.cache/`.
 - Files larger than 1 MB.
 
-### 22.3) Selection logic
+### 22.4) Selection logic
 
-When multiple keys found:
+When multiple keys found across non-canonical sources:
 - Pick the key from the **most recently modified** source file.
 - Skip keys that fail format validation (Anthropic keys start with `sk-ant-`).
 - Skip keys whose source path contains `example`, `template`, `sample`, `test` — those are placeholders.
 - Record up to 5 alternates in the links log.
 
-### 22.4) Wiring action
+### 22.5) Canonicalization step
 
-1. Confirm `.env` exists; create if not.
-2. Confirm `.env` is in `.gitignore`. Append `.env` to `.gitignore` if not (the only edit this subsystem makes outside its own log).
-3. Append `ANTHROPIC_API_KEY=<value>` to `.env`. If the line already exists, leave it and treat the located key as alternate.
-4. Verify by re-reading `.env`. Do not log the value.
+Once a key is selected (or the canonical store is found to already exist):
 
-### 22.5) Empty-state handling
+1. **Ensure `~/.anthropic/` exists.** `mkdir -p ~/.anthropic && chmod 700 ~/.anthropic`.
+2. **If `~/.anthropic/api-key` does not exist**, write the discovered key value to that file with mode `0600`. Use `umask 077` semantics — only the owner may read.
+3. **If `~/.anthropic/api-key` exists and matches the discovered key**, no-op.
+4. **If `~/.anthropic/api-key` exists and differs from the most-recent discovered key**, treat the existing canonical store as source of truth. Record the discovered alternate in the links log under "alternates" but do NOT overwrite the canonical store. (Rotation is a manual user action, not an autonomous one.)
 
-If no key found, treat as new-project state:
+### 22.6) Wiring action (reference-mode)
+
+For the new project:
+
+1. **Ensure `.env.local` exists.** Create if not. (`.env.local` is preferred over `.env` because every standard React/Vite/Next.js/Node.js scaffolder gitignores `.env.local` by default — fewer footguns than `.env`.)
+2. **Append the reference line** to `.env.local`:
+   ```
+   ANTHROPIC_API_KEY_FILE=/Users/<user>/.anthropic/api-key
+   ```
+   (Expand `$HOME` to the absolute path so cross-shell sourcing works.)
+3. **Update `.gitignore`** to ensure ALL of the following are present (append any that are missing):
+   ```
+   .env
+   .env.local
+   .env.*.local
+   .env.development.local
+   .env.production.local
+   secrets/
+   *.pem
+   *.key
+   ```
+4. **Verify gitignore enforcement** by running:
+   ```
+   git check-ignore .env.local
+   ```
+   If this command does NOT exit 0 (meaning `.env.local` is NOT actually ignored), **abort the entire wire-up immediately**. Surface to Section 20 as a `severity: critical` event. Do not proceed under any circumstances.
+5. **Generate a tiny resolver script** based on detected project language. Write it to `scripts/load-anthropic-key.{ts|py|sh}`:
+
+   **TypeScript / Node** (`scripts/load-anthropic-key.ts`):
+   ```typescript
+   import { readFileSync } from "node:fs";
+   export function loadAnthropicKey(): string {
+     const direct = process.env.ANTHROPIC_API_KEY;
+     if (direct) return direct;
+     const path = process.env.ANTHROPIC_API_KEY_FILE;
+     if (!path) throw new Error("ANTHROPIC_API_KEY_FILE not set");
+     return readFileSync(path, "utf8").trim();
+   }
+   ```
+
+   **Python** (`scripts/load_anthropic_key.py`):
+   ```python
+   import os
+   def load_anthropic_key() -> str:
+       direct = os.environ.get("ANTHROPIC_API_KEY")
+       if direct:
+           return direct
+       path = os.environ.get("ANTHROPIC_API_KEY_FILE")
+       if not path:
+           raise RuntimeError("ANTHROPIC_API_KEY_FILE not set")
+       with open(path, "r") as f:
+           return f.read().strip()
+   ```
+
+   **Shell** (`scripts/load-anthropic-key.sh`):
+   ```sh
+   #!/usr/bin/env sh
+   if [ -n "$ANTHROPIC_API_KEY" ]; then echo "$ANTHROPIC_API_KEY"; exit 0; fi
+   if [ -z "$ANTHROPIC_API_KEY_FILE" ]; then echo "ANTHROPIC_API_KEY_FILE not set" >&2; exit 1; fi
+   cat "$ANTHROPIC_API_KEY_FILE"
+   ```
+
+6. **Install a pre-commit hook** at `.git/hooks/pre-commit` (or via Husky/lefthook if either is in deps). The hook scans staged content for `sk-ant-` substrings and aborts the commit if any are found:
+
+   ```sh
+   #!/usr/bin/env sh
+   if git diff --cached -U0 | grep -qE 'sk-ant-[A-Za-z0-9_-]{20,}'; then
+     echo "ERROR: staged content contains what looks like an Anthropic API key (sk-ant-...). Commit aborted." >&2
+     echo "If this is intentional (e.g. a documentation example), remove the real prefix." >&2
+     exit 1
+   fi
+   ```
+   `chmod +x .git/hooks/pre-commit`.
+
+### 22.7) Production deployment wiring
+
+For production runtime environments, **never bundle the key into client-side code** and **never bake it into a built artifact**. Use the platform's secret store:
+
+- **Firebase Cloud Functions:** `firebase functions:secrets:set ANTHROPIC_API_KEY`, then access via `defineSecret("ANTHROPIC_API_KEY").value()` in function code.
+- **Cloud Run / GCP:** Secret Manager + secret-as-env mounting.
+- **Vercel / Netlify / Render / Railway:** the platform's encrypted environment variable UI or CLI.
+- **AWS Lambda:** Parameter Store SecureString or Secrets Manager.
+
+The skill logs the chosen production-secret path in `links.md` under Credentials Inventory.
+
+### 22.8) Empty-state handling
+
+If no key is found anywhere (including the canonical store), treat as new-project state:
 - Write TODO line to `<project>/ai_docs/links.md` Credentials Inventory:
   ```
   | ANTHROPIC_API_KEY | https://console.anthropic.com/settings/keys | Generate new key | TODO — not yet provisioned |
   ```
 - Add explicit assumption to Resource Manifest.
-- Do not block the build — scaffolding can proceed. Block only at final pre-deployment if still missing.
+- Do not block the build — scaffolding can proceed. The reference line in `.env.local` is still added; it will fail loudly at first API call until the canonical store is populated. Block only at final pre-deployment if still missing.
 
-### 22.6) Links log integration
+### 22.9) Links log integration
 
 Appends to `<project>/ai_docs/links.md` under **Credentials Inventory** only. Never writes to Projects, Services, or APIs sections.
 
-**Entry format (key found):**
+**Entry format (key wired by reference):**
 ```markdown
-| ANTHROPIC_API_KEY | <source-file-path> | Auto-copied from existing project | found <date> | preview: sk-ant-…AB12 |
+| ANTHROPIC_API_KEY | $HOME/.anthropic/api-key | Reference-wired into .env.local (key value never copied to project) | wired <date> | preview: sk-ant-…AB12 |
 ```
 
-**Entry format (alternates):**
+**Entry format (canonical store source):**
 ```markdown
-| ANTHROPIC_API_KEY (alternate) | <other-source-path> | Not selected; most recent file won | found <date> | preview: sk-ant-…CD34 |
+| ANTHROPIC_API_KEY (canonical store) | <original-source-path> | Source of canonicalization for ~/.anthropic/api-key | discovered <date> | preview: sk-ant-…AB12 |
 ```
 
 **Strict rule:** source paths recorded; last-4 previews for disambiguation; **full key values NEVER recorded.**
 
-### 22.7) Failure handling
+### 22.10) Failure handling
 
-Surfaces to Section 20 on any of: `.env` write fail, `.gitignore` edit fail, malformed key, key discovered in disallowed location (e.g. inside `node_modules`).
+Surfaces to Section 20 on any of:
+- `git check-ignore .env.local` returns non-zero — `severity: critical`, BLOCK the run.
+- `.env.local` write fails (permissions, disk full).
+- `.gitignore` edit fails.
+- Pre-commit hook installation fails.
+- Malformed key (does not match `sk-ant-` format).
+- Key discovered in a disallowed location (e.g. inside `node_modules`).
+- Canonical store has unsafe permissions (anything other than 0600).
+
+### 22.11) Rotation playbook
+
+If the user needs to rotate the Anthropic key:
+1. Generate a new key at console.anthropic.com/settings/keys.
+2. Replace contents of `~/.anthropic/api-key` (mode 0600).
+3. No project file changes needed — every project picks up the new value on next process restart.
+4. Revoke the old key in the Anthropic console.
+
+The skill documents this in the per-project `links.md` Credentials Inventory as a note.
 
 ---
 
-## 23) Multi-agent orchestration *(embedded subsystem, was a separate skill in v1.2.0)*
+## 23) Multi-agent orchestration *(rewritten in v1.4.0 — grounded in Claude Code reality, not aspirational)*
 
-Speed up phases by fanning work out to parallel sub-agents, while preventing edit conflicts, redundant work, runaway token spend, rate-limit lockouts, and coordination overhead that exceeds the speedup it was supposed to deliver.
+Speed up research-heavy and independent-subtask phases by spawning parallel sub-agents via the Claude Code `Agent` tool. This section describes what the orchestrator **actually does** in the harness today, separated from the **aspirational** features that depend on capabilities the harness doesn't yet expose mid-flight.
 
-### 23.0) Autonomy contract
+### 23.0) Reality check: what the harness actually supports
 
-Runs **autonomously** at every phase boundary. No per-spawn confirmation. Reports a single summary line per phase.
+The Claude Code `Agent` tool spawns sub-agents in parallel when invoked with multiple tool-use blocks in one message. The harness handles isolation per agent. **What the harness does NOT expose to the orchestrator** is per-agent live token counters, mid-flight rate-limit headroom, or measured-efficiency feedback during a spawn batch. Those are visible only after each batch returns.
+
+So the orchestrator works at the **batch level**, not the live-agent level. A "phase" emits one or more **fanout batches**, each batch returns, and the orchestrator decides what the next batch (or whether to fall back to serial) looks like based on what came back.
+
+### 23.1) Autonomy contract
+
+Runs **autonomously** at every phase boundary that qualifies for fanout. No per-batch confirmation in autopilot mode. Reports a single summary line per phase.
 
 **Hard limits:**
+- **Never** spawns agents in batches larger than 6.
 - **Never** spawns agents that would write to overlapping file sets.
-- **Never** exceeds hard ceiling of 6 simultaneous agents.
-- **Never** spawns parallel agents in serial-tier phases (integration, state-shared edits, deployment).
-- **Never** continues spawning when measured throughput-per-token drops below threshold.
-- **Always** uses git worktrees for isolation when agents write code, never plain branches.
+- **Never** parallelizes phases tiered as serial below.
+- **Always** uses git worktrees for isolation when sub-agents write code.
 
-### 23.1) Activation triggers
+### 23.2) Phase tiering
 
-Activates automatically at every phase boundary with ≥2 independent subtasks.
-
-| Phase | Tier | Typical fanout |
+| Phase | Tier | Typical batch size |
 |---|---|---|
 | Intake | serial | 1 |
 | Project detection | serial | 1 |
-| Resource-gathering | high | up to 6 |
-| Research | high | up to 6 |
-| Organize | medium | 2–3 |
-| Modeling | medium | 2 |
+| Plan preview (§2a) | serial | 1 |
+| Resource-gathering | parallel | 3–6 (one batch, one agent per resource category cluster) |
+| Research | parallel | 3–6 (one batch, one agent per research dimension) |
+| Organize | serial | 1 |
+| Modeling | parallel | 2 (user model + system model) |
 | Workflow construction | serial | 1 |
-| Build / scaffolding | medium | 3–4 |
-| Validation | medium | up to 5 |
+| Build / scaffolding | parallel | 2–4 (one batch, one agent per independent module) |
+| Validation | parallel | 2–5 (one batch, one agent per test suite or audit) |
 | Pre-deployment | serial | 1 |
-| Security gate | medium | up to 6 (one per layer) |
+| Security gate | parallel | up to 6 (one agent per layer in §10) |
 | Deployment | serial | 1 |
 | Reporting | serial | 1 |
 
-User overrides via "do this in parallel" / "do this serially" are honored.
+### 23.3) Independence check (real, applied at batch-plan time)
 
-### 23.2) Independence detection
+Before emitting a batch, verify:
+1. **Disjoint file write sets.** Two sub-agents about to write to the same path means a merge conflict waiting to happen — split them serially.
+2. **No producer/consumer pair in the same batch.** If agent B needs agent A's output, they can't be in the same batch.
+3. **No shared API rate-limit pool exhaustion.** If two sub-agents will both hammer the same external API, stagger them across batches.
 
-Before spawning:
-1. **File-set overlap** — disjoint write sets only.
-2. **Dependency order** — no consumer/producer in parallel.
-3. **Resource contention** — stagger calls to the same rate-limited API.
-4. **Shared state** — mutations to Resource Manifest / `links.md` / parent memory serialize after fanout.
+If any check fails for a candidate batch, downgrade those subtasks to serial.
 
-If any check fails, drop the offending subtasks back to serial.
+### 23.4) Git worktree isolation (for code-writing phases)
 
-### 23.3) Worktree isolation
+For build, scaffolding, integration phases where sub-agents write code:
+- The orchestrator creates a worktree per sub-agent: `git worktree add <project>/.worktrees/agent-<id> -b agent/<phase>/<id>`.
+- Each sub-agent is invoked with `Agent({ isolation: "worktree", ... })` — the harness handles the worktree lifecycle.
+- After the batch returns, the orchestrator merges each agent's worktree back to the integration branch sequentially.
+- Merge conflicts → log to §20, surface the conflict to the user, drop the offending subtasks to serial for retry.
 
-For code-writing phases:
-- `git worktree add <project>/.worktrees/agent-<id>` on branch `agent/<phase>/<id>`.
-- Agent operates only in its worktree.
-- Orchestrator merges back sequentially, deterministic order.
-- Merge conflict → throttle this phase down next run, log to Section 20, surface conflicting files.
-- Worktrees cleaned up after merge; abandoned worktrees pruned at phase start.
+For research, reading, and audit phases (no writes), no worktree needed.
 
-For read-only phases (research, reading), no worktree needed.
-
-### 23.4) Diminishing-returns cap
+### 23.5) Batch-level cap (the realistic version)
 
 ```
-cap = min(
+batch_cap = min(
   independent_subtask_count,
   hard_ceiling_6,
   non_overlapping_file_sets,
-  rate_limit_budget,
-  measured_throughput_cap
+  prior_batch_throttle_signal
 )
 ```
 
-**Measured throughput cap:** track per-agent `tokens_in`, `tokens_out`, `useful_output_units` (files written, tests passing, sections produced). Compute `efficiency = useful_output / tokens_total`. Maintain rolling median across last N agents. Most recent agent < 50% of median → stop spawning. Two consecutive below threshold → drop cap permanently for this run.
+**`prior_batch_throttle_signal`:** if the most recent batch in this phase returned rate-limit errors, merge conflicts, or two agents producing redundant output, the next batch is capped at 2 or downgraded to serial.
 
-### 23.5) Throttling triggers
+### 23.6) What was aspirational in v1.2.0 / v1.3.0 — now demoted to "future direction"
 
-Reduce active count immediately on:
-- API rate-limit error (HTTP 429, "rate limit exceeded", "quota exceeded").
-- Merge conflict at merge time.
-- Detected redundant work across agents.
-- Host system resource pressure.
+The earlier specs described:
+- Per-agent live `tokens_in` / `tokens_out` / efficiency tracking mid-spawn.
+- A rolling-median efficiency cap that kills spawning when efficiency drops below 50% of median.
+- Real-time throughput observability across worktrees.
 
-Throttle action: cancel youngest agent without output, refund its work to the queue.
+The Claude Code harness today exposes none of those mid-flight. **The orchestrator can only observe batch-level signals after the fact.** The earlier spec language is preserved here for honesty but is not a hard requirement — it becomes operative only when the harness exposes the needed observability hooks.
 
-### 23.6) Communication and merge protocol
+### 23.7) Communication and merge protocol
 
-Parallel agents do **not** communicate with each other. Each agent gets at spawn: scoped task, scoped read budget, scoped write budget (worktree-enforced), token budget, expected output schema.
+Parallel sub-agents do not communicate with each other. Each gets at spawn:
+- A scoped task description.
+- A scoped read budget (paths / docs they may consult).
+- A scoped write budget (worktree-enforced).
+- An expected return shape (structured summary or file paths).
 
-Each agent returns: produced artifacts, self-reported confidence, flagged dependencies.
+Each sub-agent returns artifacts (files in its worktree) or a structured summary (for research). The orchestrator merges artifacts sequentially in a deterministic order (alphabetical by agent ID), runs §8 validation on the merged result, records the pass to the Resource Manifest.
 
-Orchestrator merges sequentially in deterministic order, runs Section 8 validation on merged result, records orchestrator pass to Resource Manifest.
+### 23.8) Throttling triggers (batch-level, observed after return)
 
-### 23.7) Reporting
+After each batch returns, throttle the next batch if:
+- Any agent returned a 429 / rate-limit / quota error.
+- Any merge produced a conflict.
+- Two or more agents produced obviously redundant work (same conclusion, same files touched).
+- The phase budget has been exceeded (token or wall-time).
 
-Per phase:
+Throttle action for the next batch in this phase: cap at 2, or fall back to serial entirely.
+
+### 23.9) Reporting
+
+Per phase, one line:
 ```
-[orchestrator] phase=<phase-name> tier=<serial|medium|high> spawned=<N> completed=<K> throttled=<M> cap=<C> reason=<why-cap>
+[orchestrator] phase=<phase-name> tier=<serial|parallel> batches=<B> agents_total=<N> merge_conflicts=<C> throttled=<T> serial_fallback=<true|false>
 ```
 
-End-of-run section in Section 12 report:
+End-of-run section appended to §12 report:
 ```
 ## Multi-agent activity
+- Total batches emitted: <B>
 - Total agents spawned: <N>
-- Total worktrees created: <W>
+- Phases that fell back to serial: [list]
 - Merge conflicts encountered: <C>
 - Throttle events: <T>
-- Phases that fell back to serial: [list]
-- Estimated wall-time saved vs serial: <minutes>
 ```
 
-### 23.8) Cross-subsystem behavior
+### 23.10) Cross-subsystem behavior
 
-- **Section 20 (error mitigation)** receives all merge conflicts and throttle events as logged errors with `category: orchestration`. Recurring patterns get promoted to constraints that tighten the offending phase to serial.
-- **Section 21 (Firebase bootstrap)** is always serial.
-- **Section 22 (Anthropic key locator)** is always serial.
+- **§20 (error mitigation)** receives all merge conflicts and rate-limit/redundancy throttles as logged errors with `category: orchestration`. Recurring patterns (e.g. always-conflicting on a specific module) get promoted to constraints that tighten the offending phase to serial in future runs.
+- **§21 (Firebase bootstrap)** is always serial.
+- **§22 (Anthropic key locator)** is always serial.
+- **§10 (Security gate)** Layer 6 dependency scan, OWASP review, and HTTPS check are each independent and can run as a parallel batch within the security gate.
 
-### 23.9) Autopilot interaction
+### 23.11) Autopilot interaction
 
-Runs without per-phase confirmation. Cap decisions autonomous and logged as assumptions. Hard throttle-back recorded but does not pause. Hard BLOCKs from Section 10 still halt deployment.
+Runs without per-batch confirmation. Cap and tier decisions are autonomous and logged as assumptions in the Resource Manifest. Hard BLOCKs from §10 still halt deployment regardless of how the orchestrator routed work.
+
+---
+
+## 24) Run-state checkpointing *(new in v1.4.0)*
+
+Long autonomous runs die for boring reasons: laptops sleep, sessions close, rate limits hit, the user steps away. This subsystem makes runs resumable.
+
+### 24.1) The checkpoint file
+
+`<project>/ai_docs/run-state.json` — written at every phase boundary, read at the start of every activation (see Boot Sequence).
+
+**Schema:**
+```json
+{
+  "run_id": "run-<utc-timestamp>-<short-hash>",
+  "started_at": "<ISO-8601 UTC>",
+  "last_checkpoint_at": "<ISO-8601 UTC>",
+  "status": "in-progress | completed | aborted",
+  "current_phase": "<intake|detection|plan-preview|resource-gathering|research|organize|modeling|workflow|build|validation|pre-deploy|security|deployment|reporting>",
+  "phases_completed": ["intake", "detection", "..."],
+  "next_phase": "<phase name or null>",
+  "resource_manifest_path": "<project>/ai_docs/resource-manifest.md",
+  "cost_manifest_path": "<project>/ai_docs/cost-manifest.md",
+  "links_md_path": "<project>/ai_docs/links.md",
+  "intake_captured": { /* the full intake answers */ },
+  "stack_decision": { "frontend": "react", "state": "context", "backend": "firebase", "overrides": [] },
+  "active_constraints_loaded": ["C-001", "C-002"],
+  "pending_assumptions": [/* assumptions not yet resolved */],
+  "active_worktrees": [/* if mid-fanout, list of worktree paths */],
+  "aborted_reason": null
+}
+```
+
+### 24.2) When to write
+
+The skill writes the checkpoint:
+- After every phase completes (`phases_completed` grows, `current_phase` advances).
+- After any constraint is promoted by §20.
+- After any orchestrator batch returns (so a crash mid-fanout can roll back to a known state).
+- When the user types "stop" / "pause" — `status: aborted`, `aborted_reason: user-paused`.
+
+### 24.3) When to read (resume protocol)
+
+At the start of every activation (per Boot Sequence):
+1. Read `<project>/ai_docs/run-state.json` if it exists.
+2. If `status: in-progress`:
+   - Restore `resource_manifest_path`, `cost_manifest_path`, `links_md_path` into working context.
+   - Restore `intake_captured` and `stack_decision` — do not re-ask intake questions.
+   - Jump directly to `next_phase`.
+   - Announce briefly: `Resuming run <run_id> from phase <next_phase> (started <ago>).`
+3. If `status: completed`:
+   - This is either a re-run on a finished project (start a fresh run, write a new file) or the user is asking for a status report. Surface the file path and ask which is intended.
+4. If `status: aborted`:
+   - Surface the abort reason. Ask whether to resume from `next_phase`, start fresh, or just inspect.
+
+### 24.4) Worktree recovery
+
+If `active_worktrees` is non-empty on resume:
+- Each worktree's branch is checked for uncommitted changes.
+- Worktrees with no useful changes are pruned (`git worktree remove --force`).
+- Worktrees with changes are surfaced — the user decides merge / discard / inspect.
+
+### 24.5) Cleanup on completion
+
+When the run finishes (deployment succeeds or user accepts a partial-completion endpoint), the skill writes `status: completed` and leaves the file in place. Future runs on the same project see it and start a new `run_id`. The completed `run-state.json` is renamed to `run-state-<run_id>.json` to keep history without overwriting.
+
+### 24.6) Privacy
+
+The checkpoint contains intake answers, manifest paths, and stack decisions — **no credentials, no key values**. It is safe to commit to the repo if desired, but defaults to gitignored (`<project>/.gitignore` gets `ai_docs/run-state*.json` appended by the workflow).
+
+---
+
+## 25) Anti-patterns this skill is designed to prevent *(new in v1.4.0)*
+
+A self-test catalog. Each anti-pattern lists the failure mode, the gate or section that prevents it, and the symptom to watch for if the prevention fails.
+
+### 25.1) Overbuilt simple project
+- **Failure mode:** asked for a simple form, got a SaaS-style monorepo with microservices.
+- **Prevented by:** §2 detection gate (scope sizing) + §15 scope discipline.
+- **Symptom of prevention failing:** the workflow plan in §2a has more than 5 phases for a project the user described in under 3 sentences.
+
+### 25.2) Deployed without authentication
+- **Failure mode:** project ships to production with `allow read, write: if true` Firestore rules.
+- **Prevented by:** §10 Layer 3 (automatic BLOCK on that exact rule).
+- **Symptom of prevention failing:** deployment proceeded with a PASS WITH CONDITIONS that included an unauthenticated-write finding — this should be a BLOCK, not a condition.
+
+### 25.3) Leaked API key
+- **Failure mode:** `.env` (or `.env.local`) committed to a public repo with a real Anthropic or Firebase key.
+- **Prevented by:** §22.6 `git check-ignore` enforcement, §22.6 pre-commit hook, §22 reference-mode design.
+- **Symptom of prevention failing:** a commit lands containing an `sk-ant-…` pattern. The pre-commit hook should have blocked this — investigate why it didn't fire.
+
+### 25.4) Stuck in research forever
+- **Failure mode:** the agent loops in §4 research, never advancing to §5.
+- **Prevented by:** §4 research-rule scope-cap + §2a plan-preview which time-boxes the run.
+- **Symptom of prevention failing:** 30+ tool calls inside research with no phase advancement.
+
+### 25.5) All-or-nothing failure with no rollback
+- **Failure mode:** something breaks at §11 deployment, no clean state to return to.
+- **Prevented by:** §8 rollback paths required per phase + §24 run-state checkpointing.
+- **Symptom of prevention failing:** a failed deploy leaves the project in an unknown state with no checkpoint to resume from.
+
+### 25.6) Cost runaway in production
+- **Failure mode:** project hits 100K MAU and the user sees a $4,000 Firebase bill.
+- **Prevented by:** §4a free-tier-first cost stance + cost ladder projection.
+- **Symptom of prevention failing:** the Cost Manifest at end of run doesn't include heavy-usage projection lines.
+
+### 25.7) Silently ignored constraint
+- **Failure mode:** a constraint was promoted last run, but this run repeated the exact same mistake.
+- **Prevented by:** Boot Sequence mandatory read of `constraints.md`.
+- **Symptom of prevention failing:** a new error in this run matches the `root_cause` of an existing constraint — the constraint either wasn't loaded or wasn't applied.
+
+### 25.8) Multi-agent merge chaos
+- **Failure mode:** parallel sub-agents write conflicting changes that get clobbered at merge.
+- **Prevented by:** §23.3 disjoint-file-set check + §23.4 worktree isolation + sequential merge.
+- **Symptom of prevention failing:** a file appears in the final tree containing content from only one of multiple agents that should have all contributed.
+
+### 25.9) Approval fatigue OR silent runaway
+- **Failure mode:** either the user has to OK 12 things per run (fatigue) or the agent runs for 2 hours with zero visibility (silent runaway).
+- **Prevented by:** §2a plan-preview gate (one approval, then unattended) + §23.9 batch-level summary lines.
+- **Symptom of prevention failing:** the run had more than one approval pause, OR the run had zero status lines emitted between phases.
+
+### 25.10) Treating a paid-only feature as free
+- **Failure mode:** scaffolded SMS via Twilio without surfacing that it's metered from the first message.
+- **Prevented by:** §4a per-service free-tier evaluation.
+- **Symptom of prevention failing:** Cost Manifest shows `Twilio: $0/mo at projected light usage` without noting the per-message charge.
 
 ---
 
 ## Short embed version
 
-**Autonomous Project Research-to-Completion Skill (v1.3.0, consolidated single-skill):**
+**Autonomous Project Research-to-Completion Skill (v1.4.0, consolidated single-skill):**
 Take an initial project idea → clarify only needed information → detect project type and scope → research only project-specific requirements **including cost analysis under a free-tier-first stance** → **default to Firebase + React + React Context unless overridden** → **inventory all tools / materials / assets / APIs / libraries / configs / credentials / permissions / dependencies and classify every item as HAVE / NEED / GAP before any planning begins** → produce a Resource Manifest **and a Cost Manifest** → organize broader findings into HAVE / NEED / GAPS → convert to a phased workflow from simple to complex → validate and audit each phase → **run the six-layer security gate (identity verification, session integrity, role enforcement, abuse protection, credential hygiene, general security audit) before deployment** → deploy through the correct Firebase environment only after all checks pass. Throughout: autonomously capture errors and distill constraints (Section 20), bootstrap Firebase CLI and project (Section 21), locate and auto-wire Anthropic API key from local files (Section 22), and fan out independent subtasks to parallel sub-agents under a diminishing-returns cap (Section 23). Single skill. Truly autonomous on activation.

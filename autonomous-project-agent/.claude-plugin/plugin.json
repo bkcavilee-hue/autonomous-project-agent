@@ -1,7 +1,7 @@
 {
   "name": "autonomous-project-agent",
-  "version": "1.3.0",
-  "description": "Single-skill autonomous project agent: end-to-end workflow with phased gates, six-layer security gate (five auth layers + general security audit), Firebase + React + React Context default stack, free-tier-first cost analysis, autopilot mode, and four embedded subsystems (error mitigation loop, Firebase CLI bootstrap, local-only Anthropic API key locator, multi-agent orchestrator with diminishing-returns cap).",
+  "version": "1.4.0",
+  "description": "Single-skill autonomous project agent: end-to-end workflow with boot-time constraint loading and resume, plan-preview gate (one approval moment, then unattended), six-layer security gate, free-tier-first cost analysis, Firebase + React + React Context default stack, reference-mode Anthropic key wiring (no value copied into project files), test-first phasing, run-state checkpointing, honest multi-agent reality, and an anti-pattern self-test catalog.",
   "author": {
     "name": "Brandon"
   }
