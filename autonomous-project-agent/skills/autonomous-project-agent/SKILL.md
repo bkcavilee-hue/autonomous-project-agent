@@ -1,16 +1,16 @@
 ---
 name: autonomous-project-agent
-description: 'Use this skill autonomously whenever the user describes a project they want built — a web app, SaaS, tool, game, automation, mobile app, or anything similar — and wants it researched, planned, and built end-to-end. The skill runs the full workflow (intake, project detection, resource-gathering, research with cost analysis, organize, modeling, workflow construction, validation, pre-deployment, six-layer security gate, Firebase deployment, reporting) and also runs the four embedded subsystems autonomously on activation: error capture and constraint distillation, Firebase CLI bootstrap, local-only Anthropic API key auto-discovery, and multi-agent orchestration capped by a diminishing-returns heuristic. Recommends Firebase + React + React Context as the default stack unless intake specifies otherwise, and treats free-tier-first as the explicit cost goal. Trigger on phrases like "build me X", "I want to make Y", "spin up Z", "create a project that", "ship a SaaS", any error/exception observed during a run, any mention of Firebase or Anthropic SDK usage, or any phase boundary with independent parallel work. Runs autonomously throughout — does not pause for confirmation outside the one unavoidable Firebase OAuth login. Do NOT trigger for narrow single-step tasks (one bug fix, one function, one query).'
+description: 'Use this skill autonomously whenever the user describes a project they want built — a web app, SaaS, tool, game, automation, mobile app, or anything similar — and wants it researched, planned, and built end-to-end. The skill runs the full workflow (intake, project detection, plan-preview, resource-gathering, research with cost analysis, organize, modeling, workflow construction, validation, pre-deployment with emulator smoke tests, seven-layer security gate including connectivity audit, Firebase deployment, GitHub repo + per-phase PR creation, reporting) and runs the embedded subsystems autonomously on activation: error capture and constraint distillation, Firebase CLI bootstrap, reference-mode Anthropic key wiring (no value copied into project files), multi-agent orchestration, run-state checkpointing, and GitHub bootstrap with per-phase PRs. Recommends Firebase + React + React Context as the default stack unless intake specifies otherwise, treats free-tier-first as the explicit cost goal, and defaults to private GitHub repos with PR-only branch protection. Trigger on phrases like "build me X", "I want to make Y", "spin up Z", "create a project that", "ship a SaaS", any error/exception observed during a run, any mention of Firebase or Anthropic SDK usage, or any phase boundary with independent parallel work. Runs autonomously throughout — does not pause for confirmation outside the two allowed prompts (Firebase OAuth login, GitHub auth login). Never auto-merges its own PRs (those are the human review checkpoint). Do NOT trigger for narrow single-step tasks (one bug fix, one function, one query).'
 ---
 
 # Autonomous Project Research-to-Completion Skill
-### Version 4 (v1.4.0) — Adds Boot Sequence (constraint-loading + resume), Plan-Preview gate, test-first phasing, reference-mode Anthropic key wiring, honest multi-agent reality, run-state checkpointing, anti-pattern catalog
+### Version 5 (v1.5.0) — Adds GitHub bootstrap & per-phase PR lifecycle (§26), Layer 7 connectivity audit, emulator smoke tests at §9, and a third worked example demonstrating security-gate rejection-and-recovery
 
 ---
 
 ## Core purpose
 
-This skill takes a user's initial project articulation, identifies what kind of project it is, researches what it needs, organizes that information into a structured plan, converts the plan into phased execution, audits and tests each phase, runs a six-layer security gate before final deployment (five auth layers plus a general security audit), and deploys through Firebase only when the correct environment and approval conditions are met.
+This skill takes a user's initial project articulation, identifies what kind of project it is, researches what it needs, organizes that information into a structured plan, converts the plan into phased execution, audits and tests each phase, runs a seven-layer security gate before final deployment (five auth layers plus a general security audit), and deploys through Firebase only when the correct environment and approval conditions are met.
 
 The skill is **project-specific**, not generic. It must automatically determine which research, structure, logic, execution, and resource-gathering steps apply based on the project type chosen or detected. It must not force irrelevant sections onto the project.
 
@@ -103,6 +103,9 @@ The skill begins only after the user provides the initial project idea and the s
 - Firebase project preference (existing project ID, or 'create new'). *(Consumed by Section 21 at the resource-gathering gate.)*
 - Stack override (if any). The skill defaults to **Firebase + React + React Context** (see Section 19). If the user wants something different — different framework, different state library, different backend — this is where it gets captured.
 - Cost ceiling (optional). Defaults to "free-tier-first" per Section 4a.
+- **GitHub visibility preference.** Defaults to `private`. Public requires explicit override. *(Consumed by Section 26.)*
+- **GitHub user/org.** Defaults to the user detected by `gh auth status`. Override if pushing to an org.
+- **Branch strategy.** Defaults to `per-phase-pr` (each build sub-phase → its own PR into protected `main`). Alternatives: `single-pr` (one PR at end of run) or `no-prs` (push directly to `main` — only allowed for solo private repos with explicit override). *(Consumed by Section 26.)*
 
 ### Intake rule
 If critical information is missing, the skill must ask targeted follow-up questions before moving forward.
@@ -154,7 +157,8 @@ Between project detection and resource-gathering, the skill emits a **single one
 - **Recommended stack** (Section 19) — what the skill will use unless overridden.
 - **Phase plan:** the workflow phases that will run (intake done → resource-gathering → research → ... → deploy). Brief.
 - **Projected cost summary:** the Cost Manifest's headline numbers — `$0 at projected light usage; first paid charge would land at ~X MAU.`
-- **Security posture summary:** which security gate layers will run and which findings would be auto-BLOCK.
+- **Security posture summary:** which security gate layers will run and which findings would be auto-BLOCK. **All seven layers** (five auth + general audit + connectivity audit, see §10).
+- **GitHub plan:** repo URL that will be created (`<user>/<project-name>`), visibility (default `private`), branch strategy (default `per-phase-pr` — one PR per build sub-phase into protected `main`), expected PR count. *(See §26.)*
 - **Estimated wall-time and rough effort** ("12–18 tool calls, ~Z minutes if uninterrupted").
 - **Known assumptions** that will be logged to the Resource Manifest if not overridden.
 
@@ -462,7 +466,7 @@ The skill must convert research into a phased build workflow.
 3. Dependent modules.
 4. Integrated system.
 5. Validation layer.
-6. **Six-layer security gate** *(see Section 10)*.
+6. **Seven-layer security gate** *(see Section 10)*.
 7. Deployment layer.
 
 ### Workflow rule
@@ -477,6 +481,18 @@ Each phase must build on the previous one and become more complex only after the
 - Auth and security map.
 - Cost map.
 - Deployment map.
+- **Connectivity map** *(new in v1.5.0)* — the graph of which components import which, which routes have which handlers, which collections are read/written by which code paths. Consumed by §10 Layer 7 (connectivity audit).
+- **Smoke-test map** *(new in v1.5.0)* — the list of routes, forms, and API client calls that will get scaffolded Playwright specs and MSW contract handlers during the build phase. Consumed by §9 pre-deployment emulator smoke run.
+
+### Smoke-test scaffolding (built during build phases, run at §9) *(new in v1.5.0)*
+
+During build sub-phases that produce routes, forms, or API clients, the skill auto-generates:
+
+- **`e2e/smoke.spec.ts`** — one Playwright test per route: load the page, assert no console errors, assert no network 4xx/5xx. For auth-gated routes, log in as a seeded emulator user first.
+- **`src/mocks/handlers.ts`** — one MSW handler per external API client call (each `httpsCallable`, `fetch`, SDK call). Each handler validates the request shape and returns a typed fixture response. Mismatches between client expectation and handler shape become §10 Layer 7 BLOCK findings.
+- **`firebase.json` updates** — Auth, Firestore, Functions, Storage emulators configured so smoke tests can run end-to-end without burning real-service quota.
+
+The smoke suite is **emulator-only**. It is NOT a contract test against production APIs and NOT a load/security/accessibility audit. It is a five-minute "do the wires actually connect?" verification.
 
 ### Scope rule
 The workflow must be project-specific. If a project only needs a small tool, the workflow should stay small. If it is a large SaaS or internal platform, the workflow should deepen accordingly.
@@ -541,10 +557,24 @@ Before the security gate and deployment gate are reached, a final pre-deployment
 - All GAPs marked as assumptions have been reviewed and accepted.
 - Environment is confirmed as the correct target (dev, staging, or prod).
 - Cost Manifest is up to date and within ceiling (if a ceiling is set).
+- **Smoke test suite (built during §7) runs green against the Firebase emulator suite** *(new in v1.5.0)*.
+
+### Emulator smoke run *(new in v1.5.0)*
+
+1. Start the Firebase emulator suite: `firebase emulators:start --only auth,firestore,functions,storage,hosting`.
+2. Build the app: `npm run build`.
+3. Run the smoke spec: `npx playwright test e2e/smoke.spec.ts` against the built app pointed at emulators.
+4. Verify: every route loads with no console errors, every form submits successfully, every API client call hits the expected emulator endpoint with the expected request shape and receives the expected response shape.
+5. PASS → continue to §10. FAIL → BLOCK, surface failing route/form/call to operator, log to §20.
+
+**Scope of the smoke run:**
+- Emulator-only. Does NOT hit production or staging Firebase projects.
+- Five minutes wall-time budget. Anything longer means the smoke suite has overgrown — refactor to keep it lean.
+- Smoke covers connectivity, not behavior coverage. Full integration testing is the team's job post-MVP.
 
 ---
 
-## 10) Six-layer security gate
+## 10) Seven-layer security gate
 
 This is a **mandatory blocking gate** that runs immediately before deployment. Nothing deploys until this gate passes.
 
@@ -553,7 +583,7 @@ The security gate exists to verify that the system's identity, access control, t
 
 ### Gate structure
 
-This gate has **six layers**. All six must pass before deployment proceeds. Layers 1–5 are authentication-focused; Layer 6 is a broader security audit.
+This gate has **seven layers**. All seven must pass before deployment proceeds. Layers 1–5 are authentication-focused; Layer 6 is a broader security audit; Layer 7 is a connectivity audit (introduced in v1.5.0).
 
 ---
 
@@ -705,14 +735,78 @@ Verify the project's broader security posture beyond authentication. This layer 
 
 ---
 
-### Six-layer gate outcomes
+### Layer 7 — Connectivity audit *(new in v1.5.0)*
+
+Verify the project's wiring graph: every export is imported somewhere it matters, every import resolves, every route has a handler, every collection read has a corresponding writer with a matching schema. This layer catches "compiles fine but doesn't actually work" failures that pass Layers 1–6 but break at runtime.
+
+This is a **static** graph check over the source code. Tools used (auto-installed during resource-gathering, auto-detected by language):
+
+| Language | Primary tools |
+|---|---|
+| TypeScript / JavaScript | `knip` (exports, files, dependencies), `madge` (cycles), `dependency-cruiser` (custom rules) |
+| Python | `vulture` (dead code), `pyflakes` (undefined names), `import-linter` (architectural rules) |
+| Go | `staticcheck`, `go vet` |
+| Rust | `cargo clippy --warn dead_code` |
+
+**Checks include:**
+
+**Dead code & unused exports**
+- Functions, classes, components exported but never imported anywhere.
+- Files that exist but are imported by nothing.
+- Dependencies in `package.json` / `requirements.txt` not actually used.
+
+**Broken imports**
+- `import { foo } from './bar'` where `bar` doesn't export `foo`.
+- Imports resolving to `undefined`.
+- Type imports that don't match runtime imports.
+
+**Route / handler mismatches** *(Firebase-stack-specific extension)*
+- React Router routes defined with no corresponding component.
+- Cloud Functions defined with no callers, or callers to non-existent functions.
+- Firestore collection paths referenced in security rules but never written by any code path.
+- API client calls (e.g. `httpsCallable("foo")`) where no function named `foo` exists.
+
+**Schema consistency**
+- Firestore reads expecting fields that no write path produces.
+- TypeScript interfaces used in client code that don't match server return types.
+- Form field names that don't match the schema they POST to.
+- MSW handler shapes (from §7's smoke-test scaffolding) that don't match the client call shape they're matched against.
+
+**Cyclic dependencies**
+- Detected via `madge` for JS/TS or equivalent. Cycles WARN unless they cross architectural boundaries (e.g. UI imports from data layer that imports back to UI), which BLOCK.
+
+**Severity ladder:**
+
+| Finding | Severity |
+|---|---|
+| Missing import (resolves to nothing) | **BLOCK** |
+| Route declared without handler | **BLOCK** |
+| Handler declared without route | **WARN** (might be called dynamically) |
+| Firestore reader expects field never written | **BLOCK** |
+| Firestore writer produces field never read | **WARN** |
+| Schema mismatch between client and server types | **BLOCK** |
+| MSW handler shape mismatch with client call | **BLOCK** |
+| Dead export | **WARN** |
+| Unused file | **WARN** |
+| Unused dependency in `package.json` / `requirements.txt` | **WARN** |
+| Architectural cycle | **BLOCK** |
+| Non-architectural cycle | **WARN** |
+
+**Gate outcome:** PASS / FAIL per check group with specific findings listed. Any BLOCK → CONDITIONAL BLOCK at the overall gate level. Multiple BLOCKs or critical patterns (e.g. all routes missing handlers) → FULL BLOCK.
+
+**Integration with §20:**
+Every Layer 7 finding becomes a structured entry in `errors.jsonl` with `category: connectivity`. Recurring patterns (e.g. "schema mismatch between Firestore writer and reader" hitting on multiple projects) get promoted to constraints — likely as pre-checks in §7 requiring shared TypeScript types between server and client.
+
+---
+
+### Seven-layer gate outcomes
 
 | Result | Meaning |
 |--------|---------|
-| **FULL PASS** | All six layers passed. Deployment may proceed. |
+| **FULL PASS** | All seven layers passed. Deployment may proceed. |
 | **PASS WITH CONDITIONS** | Minor findings noted across one or more layers. Deployment may proceed with documented exceptions and a remediation deadline. |
 | **CONDITIONAL BLOCK** | Critical findings in one or more layers. Deployment is paused until specific items are resolved. |
-| **FULL BLOCK** | Severe findings (e.g. unauthenticated writes in prod rules, exposed Firebase Admin key, no server-side token validation, critical CVE in a runtime dependency, unparameterized SQL on user input). Deployment is stopped. No exceptions. |
+| **FULL BLOCK** | Severe findings (e.g. unauthenticated writes in prod rules, exposed Firebase Admin key, no server-side token validation, critical CVE in a runtime dependency, unparameterized SQL on user input, route declared with no handler, schema mismatch between Firestore writer and reader, all routes missing handlers). Deployment is stopped. No exceptions. |
 
 ### Security gate rule
 If the gate returns CONDITIONAL BLOCK or FULL BLOCK, the skill must surface the exact findings, the specific remediation steps required, and what must be re-tested before the gate can be re-run. It must not suggest workarounds or proceed anyway.
@@ -721,7 +815,7 @@ If the gate returns CONDITIONAL BLOCK or FULL BLOCK, the skill must surface the 
 
 ## 11) Firebase deployment gate
 
-The deployment step must happen only after validation, the six-layer security gate passes, and only through the approved Firebase environment.
+The deployment step must happen only after validation, the seven-layer security gate passes, and only through the approved Firebase environment.
 
 ### Firebase requirements
 - Distinct dev, test/staging, and prod environments.
@@ -735,7 +829,7 @@ The deployment step must happen only after validation, the six-layer security ga
 Do not deploy until:
 - the phase is validated,
 - the audit passes,
-- the six-layer security gate returns PASS or PASS WITH CONDITIONS,
+- the seven-layer security gate returns PASS or PASS WITH CONDITIONS,
 - the environment is confirmed correct,
 - and the deployment path is approved.
 
@@ -747,7 +841,7 @@ After execution, the skill must report:
 - what was done,
 - what passed,
 - what failed,
-- what security findings (across all six layers) were surfaced and resolved,
+- what security findings (across all seven layers) were surfaced and resolved,
 - what the Cost Manifest looks like at the end,
 - what remains,
 - what was learned,
@@ -792,7 +886,7 @@ The skill must make decisions based on project need, not template habit.
 - organize into have/need/gaps across the broader research phase,
 - build a phased workflow,
 - validate every phase,
-- run the six-layer security gate before deployment,
+- run the seven-layer security gate before deployment,
 - deploy only through Firebase correctly.
 
 ### It must not:
@@ -800,7 +894,7 @@ The skill must make decisions based on project need, not template habit.
 - overbuild simple projects,
 - underbuild complex projects,
 - skip audit or testing,
-- skip any layer of the six-layer security gate,
+- skip any layer of the seven-layer security gate,
 - deploy without environment discipline,
 - continue with unresolved critical gaps,
 - ignore the free-tier-first cost stance unless explicitly overridden.
@@ -836,7 +930,7 @@ The skill should prioritize:
 - Build from simple to complex.
 - Audit every phase.
 - Test every phase.
-- Run the six-layer security gate before any deployment.
+- Run the seven-layer security gate before any deployment.
 - Deploy only through Firebase correctly.
 - Report what happened, including all security findings and the final cost picture.
 - Run all embedded subsystems (Sections 20–23) autonomously throughout.
@@ -864,7 +958,7 @@ These should only appear when the project actually needs them.
 
 The skill's intent is not to be a generic planner.
 
-Its intent is to be a **project-specific autonomous research and execution system** that understands what a project needs, inventories the full set of resources required to make it real before any plan is written, structures it correctly, runs cost analysis under a free-tier-first stance, validates each phase, enforces a six-layer security gate before deployment, and only then completes the deployment path through the correct Firebase environment — all while autonomously logging errors, bootstrapping Firebase, locating Anthropic credentials, and orchestrating parallel sub-agents in the background.
+Its intent is to be a **project-specific autonomous research and execution system** that understands what a project needs, inventories the full set of resources required to make it real before any plan is written, structures it correctly, runs cost analysis under a free-tier-first stance, validates each phase, enforces a seven-layer security gate before deployment, and only then completes the deployment path through the correct Firebase environment — all while autonomously logging errors, bootstrapping Firebase, locating Anthropic credentials, and orchestrating parallel sub-agents in the background.
 
 ---
 
@@ -943,7 +1037,7 @@ Activates whenever ONE of the following is observed:
 - A test runner reports failures.
 - A build, compile, lint, type-check, or deploy step fails.
 - A validation gate (Section 8) returns BLOCK.
-- Any layer of the six-layer security gate returns FAIL or BLOCK.
+- Any layer of the seven-layer security gate returns FAIL or BLOCK.
 - A resource manifest item flips from HAVE to NEED/GAP unexpectedly.
 - The user types phrases like "got an error", "this failed", "broken", "fix this", "why did this fail", "regression".
 - A previously-resolved error pattern recurs.
@@ -1485,6 +1579,12 @@ Long autonomous runs die for boring reasons: laptops sleep, sessions close, rate
   "active_constraints_loaded": ["C-001", "C-002"],
   "pending_assumptions": [/* assumptions not yet resolved */],
   "active_worktrees": [/* if mid-fanout, list of worktree paths */],
+  "github_repo_url": "https://github.com/<user>/<project>",
+  "github_visibility": "private",
+  "current_branch": "feat/phase-5c-auth-flow",
+  "open_prs": [
+    { "number": 1, "title": "Phase 5a — Vite scaffold", "url": "https://github.com/.../pull/1", "branch": "feat/phase-5a-scaffold", "status": "open" }
+  ],
   "aborted_reason": null
 }
 ```
@@ -1584,7 +1684,197 @@ A self-test catalog. Each anti-pattern lists the failure mode, the gate or secti
 
 ---
 
+## 26) GitHub bootstrap & branch lifecycle *(new in v1.5.0)*
+
+Make sure every project the agent builds lives in a reviewable, version-controlled place — not in a laptop-resident directory that disappears with the next reboot. This subsystem creates the GitHub repo, enforces credential safety before any push, opens per-phase PRs for human review, and never auto-merges.
+
+### 26.0) Autonomy contract
+
+Runs **autonomously** as part of the build phase (§7) and again at end-of-run. Auto-creates the repo, auto-pushes, auto-opens PRs. **Never auto-merges PRs** — those are explicitly the human review checkpoint.
+
+**Hard limits:**
+- **Never** creates a public repo unless intake captured `github_visibility: public` explicitly.
+- **Never** pushes before `git check-ignore` enforcement (per §22.6) and credential scan pass.
+- **Never** auto-merges its own PRs.
+- **Never** overwrites an existing repo. If `<user>/<project-name>` already exists on GitHub, abort and surface the conflict.
+- **Cross-platform:** requires `gh` CLI installed. If missing, surfaces the install command (`brew install gh`, `apt install gh`, etc.) and stops.
+
+### 26.1) Activation triggers
+
+Activates when ANY of:
+- The intake captured `github_visibility` and `github_user` (default behavior — happens on every new project run).
+- The build phase (§7) completes its first sub-phase and a commit is ready.
+- The user types phrases like "push to github", "open a PR", "create a repo".
+- The `/init-repo` slash command is invoked.
+
+Does **not** activate for runs explicitly marked `branch_strategy: no-prs` (solo private repos that don't want GitHub at all).
+
+### 26.2) Bootstrap sequence (runs once per project)
+
+**Step 1 — CLI presence.**
+- Run `gh --version`. If missing, surface install command and BLOCK.
+
+**Step 2 — Authentication.**
+- Run `gh auth status`. If not authenticated, surface `gh auth login` (one allowed prompt — second alongside `firebase login` in §21). Capture the authenticated user and write to Resource Manifest as `github_user`.
+
+**Step 3 — Pre-flight gitignore check (mandatory, BLOCKING).**
+- Verify `.gitignore` exists and contains: `.env`, `.env.local`, `.env.*`, `.env.*.local`, `secrets/`, `*.pem`, `*.key`.
+- Run `git check-ignore .env.local` — must exit 0. Same for any file matching the patterns above that currently exists.
+- If ANY check fails, **abort the entire §26 sequence** and surface to §20 with `severity: critical`. Do not push to GitHub.
+
+**Step 4 — Pre-flight credential scan (mandatory, BLOCKING).**
+- Scan the working tree (excluding `node_modules/`, `.git/`, `dist/`, `build/`, `.next/`, `.cache/`) for these patterns OUTSIDE of `.env*` files:
+  - `sk-ant-[A-Za-z0-9_-]{20,}` (Anthropic)
+  - `sk-[A-Za-z0-9]{40,}` (OpenAI-style)
+  - `AIza[0-9A-Za-z_-]{35}` (Google API keys including Firebase web config — flag but don't BLOCK unless found in a tracked file outside `.env*`)
+  - High-entropy strings >= 32 chars matching `[A-Za-z0-9_-]+` patterns in source files
+- If any match is found outside `.env*` files, **BLOCK** and surface the offending file + line to the operator.
+
+**Step 5 — Repo creation.**
+- Run `gh repo create <github_user>/<project-name> --<visibility> --source=. --remote=origin --description "<one-line project description from intake>"`.
+- `<visibility>` defaults to `--private`. Only `--public` if intake captured `github_visibility: public`.
+- If the repo already exists, abort and surface — never overwrite.
+
+**Step 6 — Initial commit.**
+- `git add -A`
+- `git commit -m "Initial scaffold from autonomous-project-agent v1.5.0\n\nProject: <name>\nStack: <stack summary>\nGenerated by autopilot."`
+
+**Step 7 — Push `main`.**
+- `git push -u origin main`
+
+**Step 8 — Branch protection on `main` (PR-only, per intake default `branch_protection: pr-only`).**
+- Via `gh api -X PUT repos/<user>/<repo>/branches/main/protection -f required_pull_request_reviews=null -f enforce_admins=true -f required_status_checks=null -f restrictions=null` (configured to require PRs but not approving reviews — appropriate for solo accounts; teams override via intake to `pr-plus-review`).
+- Confirm protection is active via `gh api repos/<user>/<repo>/branches/main/protection`.
+
+**Step 9 — Dependabot + secret scanning.**
+- Write `.github/dependabot.yml` for the detected package manager (npm/pip/cargo/gomod/etc.). Weekly schedule by default.
+- For private repos: enable secret scanning via `gh api -X PATCH repos/<user>/<repo> -f security_and_analysis[secret_scanning][status]=enabled` if the account tier supports it. If not (free private), skip and log a note.
+- For public repos: secret scanning is auto-enabled by GitHub. Just verify.
+
+**Step 10 — Set integration branch.**
+- Create `dev` branch: `git checkout -b dev && git push -u origin dev`. All subsequent build sub-phases work on `dev`-derived feature branches; PRs target `main`.
+
+**Step 11 — Log to `links.md`** under Projects:
+```markdown
+| GitHub repo | https://github.com/<user>/<repo> | Source of truth (visibility: private) | added <date> | source-of-truth: y |
+| GitHub Actions | https://github.com/<user>/<repo>/actions | CI runs | added <date> | source-of-truth: y |
+| Dependabot | https://github.com/<user>/<repo>/security/dependabot | Vulnerability alerts | added <date> | source-of-truth: y |
+| Secret scanning | https://github.com/<user>/<repo>/security/secret-scanning | Credential leak detection | added <date> | source-of-truth: y |
+```
+
+### 26.3) Per-phase PR pattern (default `branch_strategy: per-phase-pr`)
+
+For each build sub-phase in §7:
+
+1. **Start fresh from `dev`:**
+   ```
+   git checkout dev && git pull
+   git checkout -b feat/phase-<id>-<slug>
+   ```
+
+2. **Do the phase's work** (scaffolding, code, tests).
+
+3. **Commit per phase:**
+   ```
+   git add -A && git commit -m "Phase <id>: <title>\n\n<bullet list of what changed>"
+   ```
+
+4. **Push the branch:**
+   ```
+   git push -u origin feat/phase-<id>-<slug>
+   ```
+
+5. **Open the PR:**
+   ```
+   gh pr create --base main --head feat/phase-<id>-<slug> --title "Phase <id> — <title>" --body "<auto-populated body, see below>"
+   ```
+
+6. **PR body template** (auto-populated from Resource Manifest entries and test results):
+   ```markdown
+   ## Summary
+   <one paragraph describing what this phase delivered>
+
+   ## Files changed
+   - <list of files touched>
+
+   ## Tests added
+   - <list of new tests>
+
+   ## Resource Manifest entries
+   - <newly resolved NEEDs>
+   - <newly accepted assumptions>
+
+   ## Smoke / connectivity status
+   - Layer 7 audit (this branch): PASS / WARN / FAIL
+   - Emulator smoke (this branch): PASS / FAIL / not yet run
+
+   ## How to review
+   <one paragraph guiding the reviewer to the key files and what to verify>
+
+   ---
+   🤖 Opened autonomously by autonomous-project-agent v1.5.0. Not auto-merged. Review and merge on your schedule.
+   ```
+
+7. **Log the PR** to `links.md` under a new **PRs** section (created on first PR if missing):
+   ```markdown
+   ## PRs
+   | # | Title | URL | Branch | Status | Opened |
+   |---|---|---|---|---|---|
+   | <N> | Phase <id> — <title> | <pr-url> | feat/phase-<id>-<slug> | open | <date> |
+   ```
+
+8. **Continue building on `dev`** for the next phase. `dev` rebases onto its own previous state, not onto `main` — `main` stays clean until operator merges PRs.
+
+### 26.4) End-of-run behavior
+
+When the run completes (deployment to dev alias succeeded, §12 reporting gate reached):
+- **Do not auto-merge any PR.** They stay open.
+- The §12 final report includes a **PR Queue** section listing all open PRs with one-line descriptions and review guidance.
+- Surface to the operator: *"N PRs open against `main`. Review at your convenience: <list of URLs>. The agent will not merge any of them."*
+
+### 26.5) Alternative branch strategies
+
+If intake captured `branch_strategy: single-pr`:
+- All build phases commit to a single `dev` branch.
+- One PR opened at end of run: `gh pr create --base main --head dev --title "<project> initial build"` with all phases summarized in the body.
+
+If intake captured `branch_strategy: no-prs`:
+- Only allowed for solo private repos.
+- Build phases commit directly to `main` (no feature branches, no PRs).
+- Branch protection on `main` is **NOT** enabled in this mode.
+- Surface a warning: *"branch_strategy: no-prs disables PR review and branch protection. Continue?"* In autopilot, this warning is logged but doesn't pause.
+
+### 26.6) Failure handling
+
+Every failure surfaces to §20 with `category: github`. Common failures:
+- `gh` CLI not installed → BLOCK with install instructions.
+- Not authenticated → BLOCK with `gh auth login`.
+- Repo already exists → BLOCK, ask for different name.
+- Pre-flight gitignore check fails → CRITICAL BLOCK, no push attempted.
+- Pre-flight credential scan finds keys outside `.env*` → CRITICAL BLOCK, surface offending files.
+- Push fails (auth expired, network) → retry once, then BLOCK.
+- PR creation fails (rate limit, permissions) → retry once with backoff, then continue without that PR but flag in final report.
+
+### 26.7) Autopilot interaction
+
+All steps autonomous **except** `gh auth login` if the user isn't already authenticated. That's the one allowed prompt, same shape as `firebase login` in §21.
+
+In autopilot mode:
+- Visibility defaults to `private`.
+- Branch strategy defaults to `per-phase-pr`.
+- Branch protection defaults to PR-only (no required reviews).
+- All defaults logged as assumptions in the Resource Manifest.
+
+### 26.8) Integration with other sections
+
+- **§22 (Anthropic key):** §22's `git check-ignore` check is a prerequisite for §26 Step 3. They share the same gitignore enforcement floor.
+- **§24 (run state):** `github_repo_url`, `github_visibility`, `current_branch`, `open_prs` all written to `run-state.json` at every phase boundary. Resume on a different machine picks up the lifecycle.
+- **§10 Layer 7:** Layer 7 results are reported in each PR's body (`Smoke / connectivity status` section).
+- **§12 (reporting):** end-of-run report includes PR Queue with review guidance.
+
+---
+
 ## Short embed version
 
-**Autonomous Project Research-to-Completion Skill (v1.4.0, consolidated single-skill):**
-Take an initial project idea → clarify only needed information → detect project type and scope → research only project-specific requirements **including cost analysis under a free-tier-first stance** → **default to Firebase + React + React Context unless overridden** → **inventory all tools / materials / assets / APIs / libraries / configs / credentials / permissions / dependencies and classify every item as HAVE / NEED / GAP before any planning begins** → produce a Resource Manifest **and a Cost Manifest** → organize broader findings into HAVE / NEED / GAPS → convert to a phased workflow from simple to complex → validate and audit each phase → **run the six-layer security gate (identity verification, session integrity, role enforcement, abuse protection, credential hygiene, general security audit) before deployment** → deploy through the correct Firebase environment only after all checks pass. Throughout: autonomously capture errors and distill constraints (Section 20), bootstrap Firebase CLI and project (Section 21), locate and auto-wire Anthropic API key from local files (Section 22), and fan out independent subtasks to parallel sub-agents under a diminishing-returns cap (Section 23). Single skill. Truly autonomous on activation.
+**Autonomous Project Research-to-Completion Skill (v1.5.0, consolidated single-skill):**
+Take an initial project idea → clarify only needed information → detect project type and scope → research only project-specific requirements **including cost analysis under a free-tier-first stance** → **default to Firebase + React + React Context unless overridden** → **inventory all tools / materials / assets / APIs / libraries / configs / credentials / permissions / dependencies and classify every item as HAVE / NEED / GAP before any planning begins** → produce a Resource Manifest **and a Cost Manifest** → emit a one-page **plan preview** with one approval moment → organize broader findings into HAVE / NEED / GAPS → convert to a phased workflow from simple to complex (test-first within each code-mutating phase) → **scaffold smoke specs and MSW handlers during build, push per-phase PRs to a private GitHub repo with branch protection** → run **§9 emulator smoke** → run the **seven-layer security gate** (identity, session, roles, abuse protection, credential hygiene, general security audit, connectivity audit) → deploy through the correct Firebase environment only after all checks pass → final report includes a PR Queue for human review (the agent never auto-merges). Throughout: autonomously capture errors and distill constraints (§20), bootstrap Firebase CLI and project (§21), locate and reference-wire Anthropic API key from local files (§22), fan out independent subtasks to parallel sub-agents under a diminishing-returns cap (§23), checkpoint run state for resumability (§24), and bootstrap GitHub with per-phase PRs (§26). Single skill. Truly autonomous on activation, with one human approval at plan-time and PRs as the team review checkpoint.
