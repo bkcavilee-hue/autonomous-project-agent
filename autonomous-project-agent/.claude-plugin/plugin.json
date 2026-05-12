@@ -1,7 +1,7 @@
 {
   "name": "autonomous-project-agent",
-  "version": "1.5.0",
-  "description": "Single-skill autonomous project agent: end-to-end workflow with boot-time constraint loading and resume, plan-preview gate (one approval moment, then unattended), seven-layer security gate including connectivity audit, emulator smoke tests at pre-deployment, free-tier-first cost analysis, Firebase + React + React Context default stack, reference-mode Anthropic key wiring, test-first phasing, run-state checkpointing, GitHub bootstrap with per-phase PRs into protected main, anti-pattern self-test catalog. Never auto-merges its own PRs.",
+  "version": "1.6.0",
+  "description": "Single-skill autonomous project agent: end-to-end workflow with boot-time constraint loading and resume, plan-preview gate (one approval moment, then unattended), seven-layer security gate including connectivity audit, emulator smoke tests with port-open polling at pre-deployment, deploy verification via HTTP polling, free-tier-first cost analysis, Firebase + React + React Context default stack, reference-mode Anthropic key wiring, test-first phasing, run-state checkpointing, GitHub bootstrap with per-phase PRs and end-of-run CI status polling, anti-pattern self-test catalog, and polling discipline (§27) across all external-state waits. Never auto-merges its own PRs; never auto-promotes dev to prod.",
   "author": {
     "name": "Brandon"
   }

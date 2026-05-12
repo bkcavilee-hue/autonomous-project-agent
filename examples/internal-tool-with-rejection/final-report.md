@@ -86,3 +86,9 @@ Repo: https://github.com/<operator>/team-inventory-tool (private). Branch protec
 3. **Constraints propagate.** Three constraints (C-012, C-013, C-014) were promoted. Future runs will run `npm audit --production` as a pre-check, will generate Firestore writer/reader pairs from shared types, and will verify routes have handlers before §10 is even reached. This run paid the cost of the discovery; future runs benefit.
 
 4. **PRs preserve human oversight.** Even with full autonomy on the build + recovery, five PRs were opened against protected `main` and **none were auto-merged**. The operator gets to review what shipped before it ships.
+
+5. **Polling caught two race conditions silently** *(noted as of v1.6.0)*. Pre-v1.6.0 this run would have produced two intermittent flaky failures that looked random:
+   - **§9 emulator smoke** would have started running the Playwright spec before the Firestore emulator was listening on `:8080`, producing a "Connection refused" failure on roughly 1 in 4 runs. `poll_until_port_open` now waits for all five emulator ports before the spec runs. **Zero flakiness here.**
+   - **§11 deploy verification** would have hit the deployed `web.app` URL during the 20–40 second CDN propagation window, getting a 404 and declaring deploy failure even though the deploy itself succeeded. `poll_until_http_ok` now waits up to 300s for the URL to actually serve 200. **In this run, the URL was live at 38 seconds — well within the polling window.**
+
+   Neither catch generated a constraint (these aren't errors — they're expected propagation delays handled correctly). But without §27, they'd have surfaced as intermittent failures that the operator would have had to debug manually.

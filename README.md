@@ -1,6 +1,6 @@
 # autonomous-project-agent
 
-A Claude Code plugin marketplace containing the **autonomous-project-agent** plugin — a single-skill, end-to-end autonomous project agent. Recommends **Firebase + React + React Context** as the default stack (unless intake says otherwise), runs **free-tier-first cost analysis** during research, enforces a **seven-layer security gate** before deployment (five auth layers + general security audit + **connectivity audit**), runs **emulator smoke tests** at pre-deployment, **bootstraps a private GitHub repo with per-phase PRs** into protected `main`, and embeds five autonomous subsystems (error-mitigation loop, Firebase CLI bootstrap, reference-mode Anthropic key wiring, multi-agent orchestrator, GitHub lifecycle) directly inside the main workflow. **Never auto-merges its own PRs** — those are the human review checkpoint.
+A Claude Code plugin marketplace containing the **autonomous-project-agent** plugin — a single-skill, end-to-end autonomous project agent. Recommends **Firebase + React + React Context** as the default stack (unless intake says otherwise), runs **free-tier-first cost analysis** during research, enforces a **seven-layer security gate** before deployment (five auth layers + general security audit + **connectivity audit**), runs **emulator smoke tests** at pre-deployment, **verifies live deploys via HTTP polling**, **bootstraps a private GitHub repo with per-phase PRs** into protected `main`, and embeds six autonomous subsystems (error-mitigation loop, Firebase CLI bootstrap, reference-mode Anthropic key wiring, multi-agent orchestrator, GitHub lifecycle, **polling discipline**) directly inside the main workflow. **Never auto-merges its own PRs** — those are the human review checkpoint.
 
 ---
 
@@ -33,7 +33,8 @@ A Claude Code plugin marketplace containing the **autonomous-project-agent** plu
 | §23 | Multi-agent orchestrator (honest reality version) — batch-level fanout, isolated git worktrees, sequential merge. |
 | §24 | Run-state checkpointing — `<project>/ai_docs/run-state.json` enables resume after laptop sleep / session close / rate limit. |
 | §25 | Anti-pattern catalog — 10 named failure modes the workflow is designed to prevent. |
-| **§26** | **GitHub bootstrap & branch lifecycle** — `gh auth status` → pre-flight gitignore + credential scan → private repo with `gh repo create` → PR-only branch protection → per-phase PRs into `main` → Dependabot + secret scanning. **Never auto-merges.** |
+| **§26** | **GitHub bootstrap & branch lifecycle** — `gh auth status` → pre-flight gitignore + credential scan → private repo with `gh repo create` → PR-only branch protection → per-phase PRs into `main` → Dependabot + secret scanning. End-of-run polls PR CI status to populate the final PR Queue with real results. **Never auto-merges.** |
+| **§27** | **Polling discipline** (new in v1.6.0) — four named helpers: `poll_until_http_ok` (deploy URL verification), `poll_until_port_open` (emulator startup), `poll_pr_checks` (PR CI status), `poll_with_backoff_on_429` (rate-limit recovery, honors `Retry-After`). Plus `poll_firebase_project_exists` for §21 project propagation. Every wait has a bounded timeout, appropriate interval, and distinguishes errors from not-ready. Eliminates the "intermittent failure for no obvious reason" class of bug. |
 
 **Slash commands:**
 - `/agent-status` — prints the active run's phase, manifests, errors, constraints, worktrees, PRs. Read-only introspection.
@@ -102,6 +103,7 @@ Three worked examples in [`examples/`](./examples/) show what an end-to-end run 
 - **Emulator smoke tests at pre-deployment.** Five-minute run through every route, form, and API call against Firebase emulators before §10.
 - **Append-only everything:** error log, constraints, `links.md`, `run-state.json` all grow without ever rewriting prior entries.
 - **GitHub-native lifecycle.** Private repo by default, per-phase PRs into protected `main`, Dependabot + secret scanning enabled. **Never auto-merges its own PRs** — the human review checkpoint stays human.
+- **Polling discipline** (§27) eliminates the "intermittent failure for no obvious reason" class of bug. Emulator startup, deploy propagation, PR CI status, 429 backoff, and Firebase project creation all use named polling helpers with bounded timeouts and appropriate intervals.
 - **Anti-pattern catalog** (§25) documents 10 named failure modes the workflow prevents, each tied to the gate that catches it.
 
 ---

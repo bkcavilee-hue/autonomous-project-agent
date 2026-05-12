@@ -1,10 +1,10 @@
 ---
 name: autonomous-project-agent
-description: 'Use this skill autonomously whenever the user describes a project they want built — a web app, SaaS, tool, game, automation, mobile app, or anything similar — and wants it researched, planned, and built end-to-end. The skill runs the full workflow (intake, project detection, plan-preview, resource-gathering, research with cost analysis, organize, modeling, workflow construction, validation, pre-deployment with emulator smoke tests, seven-layer security gate including connectivity audit, Firebase deployment, GitHub repo + per-phase PR creation, reporting) and runs the embedded subsystems autonomously on activation: error capture and constraint distillation, Firebase CLI bootstrap, reference-mode Anthropic key wiring (no value copied into project files), multi-agent orchestration, run-state checkpointing, and GitHub bootstrap with per-phase PRs. Recommends Firebase + React + React Context as the default stack unless intake specifies otherwise, treats free-tier-first as the explicit cost goal, and defaults to private GitHub repos with PR-only branch protection. Trigger on phrases like "build me X", "I want to make Y", "spin up Z", "create a project that", "ship a SaaS", any error/exception observed during a run, any mention of Firebase or Anthropic SDK usage, or any phase boundary with independent parallel work. Runs autonomously throughout — does not pause for confirmation outside the two allowed prompts (Firebase OAuth login, GitHub auth login). Never auto-merges its own PRs (those are the human review checkpoint). Do NOT trigger for narrow single-step tasks (one bug fix, one function, one query).'
+description: 'Use this skill autonomously whenever the user describes a project they want built — a web app, SaaS, tool, game, automation, mobile app, or anything similar — and wants it researched, planned, and built end-to-end. The skill runs the full workflow (intake, project detection, plan-preview, resource-gathering, research with cost analysis, organize, modeling, workflow construction, validation, pre-deployment with emulator smoke tests, seven-layer security gate including connectivity audit, Firebase deployment with HTTP polling verification, GitHub repo + per-phase PR creation with CI status polling, reporting) and runs the embedded subsystems autonomously on activation: error capture and constraint distillation, Firebase CLI bootstrap with creation-propagation polling, reference-mode Anthropic key wiring (no value copied into project files), multi-agent orchestration with 429 backoff polling, run-state checkpointing, GitHub bootstrap with per-phase PRs, and polling discipline across all external-state waits. Recommends Firebase + React + React Context as the default stack unless intake specifies otherwise, treats free-tier-first as the explicit cost goal, and defaults to private GitHub repos with PR-only branch protection. Trigger on phrases like "build me X", "I want to make Y", "spin up Z", "create a project that", "ship a SaaS", any error/exception observed during a run, any mention of Firebase or Anthropic SDK usage, or any phase boundary with independent parallel work. Runs autonomously throughout — does not pause for confirmation outside the two allowed prompts (Firebase OAuth login, GitHub auth login). Never auto-merges its own PRs and never auto-promotes dev to prod (those are the human review checkpoints). Do NOT trigger for narrow single-step tasks (one bug fix, one function, one query).'
 ---
 
 # Autonomous Project Research-to-Completion Skill
-### Version 5 (v1.5.0) — Adds GitHub bootstrap & per-phase PR lifecycle (§26), Layer 7 connectivity audit, emulator smoke tests at §9, and a third worked example demonstrating security-gate rejection-and-recovery
+### Version 6 (v1.6.0) — Adds Polling discipline (§27) with four named helpers, retrofits §9/§11/§21/§23/§26 to use polling for emulator startup, deploy propagation, Firebase project propagation, 429 backoff, and PR CI status
 
 ---
 
@@ -559,13 +559,21 @@ Before the security gate and deployment gate are reached, a final pre-deployment
 - Cost Manifest is up to date and within ceiling (if a ceiling is set).
 - **Smoke test suite (built during §7) runs green against the Firebase emulator suite** *(new in v1.5.0)*.
 
-### Emulator smoke run *(new in v1.5.0)*
+### Emulator smoke run *(new in v1.5.0, polling-aware as of v1.6.0)*
 
-1. Start the Firebase emulator suite: `firebase emulators:start --only auth,firestore,functions,storage,hosting`.
-2. Build the app: `npm run build`.
-3. Run the smoke spec: `npx playwright test e2e/smoke.spec.ts` against the built app pointed at emulators.
-4. Verify: every route loads with no console errors, every form submits successfully, every API client call hits the expected emulator endpoint with the expected request shape and receives the expected response shape.
-5. PASS → continue to §10. FAIL → BLOCK, surface failing route/form/call to operator, log to §20.
+1. **Start the Firebase emulator suite in the background:** `firebase emulators:start --only auth,firestore,functions,storage,hosting &`.
+2. **Wait for emulators to actually be listening** via `poll_until_port_open` (§27) for each emulator's default port:
+   - Firestore: `localhost:8080`
+   - Auth: `localhost:9099`
+   - Functions: `localhost:5001`
+   - Storage: `localhost:9199`
+   - Hosting: `localhost:5000`
+   Default timeout: 30s per port. If any port fails to open, BLOCK and surface to §20 — do not run the smoke spec against half-started emulators.
+3. **Build the app:** `npm run build`.
+4. **Run the smoke spec:** `npx playwright test e2e/smoke.spec.ts` against the built app pointed at emulators.
+5. **Verify:** every route loads with no console errors, every form submits successfully, every API client call hits the expected emulator endpoint with the expected request shape and receives the expected response shape.
+6. **Tear down emulators** when done (`kill` the background process).
+7. PASS → continue to §10. FAIL → BLOCK, surface failing route/form/call to operator, log to §20.
 
 **Scope of the smoke run:**
 - Emulator-only. Does NOT hit production or staging Firebase projects.
@@ -832,6 +840,28 @@ Do not deploy until:
 - the seven-layer security gate returns PASS or PASS WITH CONDITIONS,
 - the environment is confirmed correct,
 - and the deployment path is approved.
+
+### Deploy verification (polling-aware as of v1.6.0)
+
+`firebase deploy` returns quickly but the deployed URL is not necessarily live yet — CDN propagation takes seconds to minutes, and Cloud Functions cold starts add more delay. Do not declare deploy success on the basis of the CLI return alone.
+
+After `firebase deploy` returns:
+
+1. **Determine the deployed URL** from the CLI output (typically `https://<projectId>.web.app` for Hosting, or function-specific URLs).
+2. **Run `poll_until_http_ok` (§27)** against the deployed URL. Default timeout 300s, interval 10s.
+3. If polling times out → BLOCK, surface to §20 with `category: deploy`, `severity: high`, `root_cause: "deploy returned but URL did not serve 200 within 300s"`.
+4. If polling succeeds → **run a subset of the §9 smoke spec against the deployed dev URL** (not against emulators). This is the production-style verification — same routes, same forms, same API calls, but against the actually-deployed environment.
+5. Only after the deployed smoke passes is the deploy considered successful.
+
+For Cloud Functions specifically:
+- Each function's HTTPS trigger URL is also polled with `poll_until_http_ok` (typically returns 200 on a no-arg call, or 400 with a "missing parameters" message — both indicate the function is warm and serving).
+
+### Production promotion
+
+Promotion from `dev` to `prod` requires:
+- All §10 layers still PASS on the dev deploy.
+- Deploy verification (above) PASSED on dev.
+- Explicit operator confirmation. Autopilot does NOT auto-promote to prod even with the autonomy flags set — prod deploys are the final human checkpoint, in the same spirit as §26's "never auto-merge PRs."
 
 ---
 
@@ -1169,6 +1199,8 @@ Activates when ANY of:
 2. Project name match (case-insensitive, dash/underscore tolerant).
 3. Autopilot create: `firebase projects:create <slug>-<short-hash> --display-name "<project name>"`.
 4. Non-autopilot ambiguity: present list and ask.
+
+**Step 4a — Wait for project propagation (polling, new in v1.6.0).** After `firebase projects:create`, the project takes 10–30 seconds to propagate before subsequent CLI calls can find it. Run `poll_firebase_project_exists` (§27.3) against the new project ID — default timeout 60s, interval 5s. Do not proceed to Step 5 until propagation completes. Without this, `firebase use --add` will sometimes fail with "project not found" on a freshly-created project.
 
 **Step 5 — Environment aliasing.** `firebase use --add <projectId> --alias <dev|staging|prod>` for each env. Confirm via `firebase use`.
 
@@ -1521,7 +1553,9 @@ After each batch returns, throttle the next batch if:
 - Two or more agents produced obviously redundant work (same conclusion, same files touched).
 - The phase budget has been exceeded (token or wall-time).
 
-Throttle action for the next batch in this phase: cap at 2, or fall back to serial entirely.
+**Throttle action for the next batch in this phase:**
+- On 429 / rate-limit: invoke `poll_with_backoff_on_429` (§27) on the call that hit the limit. Honor `Retry-After` if present, exponential backoff otherwise, capped at 300s total. After recovery, cap the next batch at 2 sub-agents. If `poll_with_backoff_on_429` itself times out (300s total wait without successful retry), the rate-limit is structural — fall back to serial for the rest of this phase and surface to §20 with `severity: high`.
+- On merge conflict or redundant work: cap next batch at 2, or fall back to serial entirely.
 
 ### 23.9) Reporting
 
@@ -1818,12 +1852,17 @@ For each build sub-phase in §7:
 7. **Log the PR** to `links.md` under a new **PRs** section (created on first PR if missing):
    ```markdown
    ## PRs
-   | # | Title | URL | Branch | Status | Opened |
-   |---|---|---|---|---|---|
-   | <N> | Phase <id> — <title> | <pr-url> | feat/phase-<id>-<slug> | open | <date> |
+   | # | Title | URL | Branch | Status | CI | Opened |
+   |---|---|---|---|---|---|---|
+   | <N> | Phase <id> — <title> | <pr-url> | feat/phase-<id>-<slug> | open | pending | <date> |
    ```
 
 8. **Continue building on `dev`** for the next phase. `dev` rebases onto its own previous state, not onto `main` — `main` stays clean until operator merges PRs.
+
+9. **Poll PR checks (polling-aware as of v1.6.0).** Invoke `poll_pr_checks` (§27) against the new PR. Default timeout 600s, interval 30s. The skill does NOT block waiting for PR checks during the run — `poll_pr_checks` is invoked **at end of run** (per phase 12) so the §12 final report shows real CI status, not "pending."
+   - On `poll_pr_checks` success → update the PR's `links.md` row with the final CI status (`pass` / `fail` / `partial`) and update the PR body's "Smoke / connectivity status" section via `gh pr edit`.
+   - On `poll_pr_checks` timeout (CI exceeded 10 minutes) → mark the PR's CI status as `timeout` in `links.md`, surface in §12 report. Do not BLOCK the deploy — CI on the PR is independent of the workflow's own §9 emulator smoke.
+   - On any CI check returning FAIL → surface in §12 report as `PR #<N> has failing checks: <names>`. The operator decides whether to fix-and-push or merge anyway.
 
 ### 26.4) End-of-run behavior
 
@@ -1874,7 +1913,158 @@ In autopilot mode:
 
 ---
 
+## 27) Polling discipline *(new in v1.6.0)*
+
+Several sections of this skill wait on external state — emulator startup, deploy propagation, CI checks, rate-limit recovery, project creation. A one-shot check immediately after the triggering command is unreliable because the *triggering* command returns fast while the *resulting* state takes seconds to minutes to settle. This section codifies the right way to wait.
+
+### 27.0) When polling is appropriate
+
+Use polling when:
+- The state you want is produced by an asynchronous process you don't control directly.
+- No webhook, event, or push channel is available (or the available one is unreliable).
+- The wait is bounded — there's a reasonable upper limit on how long it could legitimately take.
+
+Don't poll when:
+- A synchronous return is available (use it).
+- A push/event channel exists (use it).
+- The condition you're checking is on a local file system event (use file watchers, not polling).
+
+### 27.1) Three rules of good polling
+
+1. **Bounded.** Every poll has a maximum wait. Infinite polling is a bug. Default behavior on timeout: surface to §20 with `severity: high` and abort the surrounding action.
+2. **Appropriate interval.** Match the natural rhythm of what you're waiting on. Emulator port-open ≈ 500ms. CDN propagation ≈ 10s. CI check completion ≈ 30s. Cron-style jobs ≈ minutes. Don't poll a 5-minute thing every 100ms; don't poll a 100ms thing every 30s.
+3. **Distinguish errors from not-ready.** A 500 from the endpoint you're polling is different from a 404 saying "not deployed yet." Treat them differently. Errors should fail fast; not-ready should keep polling.
+
+### 27.2) Named polling helpers
+
+This skill uses four standard polling helpers. Other sections invoke them by name with their specified defaults. The helpers are conceptual — actual implementation is via the Claude Code `Bash` tool with the relevant `curl` / `gh` / `firebase` commands inside an `until` loop, or via `Monitor` with a stream-aware until-condition when watching a background process.
+
+#### `poll_until_http_ok(url, timeout=300, interval=10, expected_status=200)`
+
+Polls an HTTP endpoint until it returns the expected status code.
+
+- **Default timeout:** 300 seconds (5 minutes) — appropriate for CDN propagation and Cloud Functions cold starts.
+- **Default interval:** 10 seconds — most propagation completes within 30s; 10s gives 3 checks within the first window without burning quota.
+- **Distinguishes:** connection refused / DNS failure / 5xx → keep polling (server still coming up). 4xx other than 404 → fail immediately (the request itself is wrong). Expected status → success.
+- **Used by:** §11 (Firebase deploy verification).
+
+Implementation pattern:
+```sh
+end=$(($(date +%s) + 300))
+while [ $(date +%s) -lt $end ]; do
+  status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" || echo "000")
+  case "$status" in
+    200) echo "ready"; exit 0 ;;
+    000|404|5*) sleep 10 ;;  # not-ready / transient — keep polling
+    4*) echo "client error: $status"; exit 1 ;;  # request is wrong, fail fast
+  esac
+done
+echo "timeout"; exit 1
+```
+
+#### `poll_until_port_open(host="localhost", port, timeout=30, interval=0.5)`
+
+Polls a TCP port until it accepts connections.
+
+- **Default timeout:** 30 seconds — emulators and dev servers all start within this budget.
+- **Default interval:** 0.5 seconds — tight because the wait is short and the check is local + cheap.
+- **Distinguishes:** connection refused → keep polling. Connection reset → keep polling. Successful connect → success.
+- **Used by:** §9 (Firebase emulator startup), any local dev server health-check.
+
+Implementation pattern:
+```sh
+end=$(($(date +%s) + 30))
+while [ $(date +%s) -lt $end ]; do
+  if nc -z localhost "$PORT" 2>/dev/null; then exit 0; fi
+  sleep 0.5
+done
+exit 1
+```
+
+#### `poll_pr_checks(pr_number, timeout=600, interval=30)`
+
+Polls GitHub PR status checks until all checks have completed (PASS or FAIL).
+
+- **Default timeout:** 600 seconds (10 minutes) — most CI runs complete within this budget; longer means investigate.
+- **Default interval:** 30 seconds — CI status updates aren't more frequent than this anyway.
+- **Distinguishes:** any check still pending → keep polling. All checks PASS → success. Any check FAIL → success-with-failure (return the failing check names, don't abort).
+- **Used by:** §26 (PR lifecycle).
+
+Implementation pattern:
+```sh
+end=$(($(date +%s) + 600))
+while [ $(date +%s) -lt $end ]; do
+  state=$(gh pr checks "$PR" --json state -q '[.[]] | map(.state) | unique')
+  if ! echo "$state" | grep -q "PENDING\|IN_PROGRESS\|QUEUED"; then
+    echo "$state"; exit 0
+  fi
+  sleep 30
+done
+echo "timeout"; exit 1
+```
+
+#### `poll_with_backoff_on_429(call, max_wait=300)`
+
+Honors `Retry-After` on HTTP 429 responses and retries with exponential backoff if no `Retry-After` is provided.
+
+- **Default max wait:** 300 seconds total (sum of all backoff intervals) — beyond this, the rate-limit is structural and the run should pause for operator action.
+- **Backoff algorithm:** if `Retry-After: N` is present, sleep N seconds. If absent, exponential — 1s, 2s, 4s, 8s, 16s, 32s, capped at 60s per attempt.
+- **Distinguishes:** 429 → backoff + retry. Other errors → propagate immediately.
+- **Used by:** §23 (orchestrator throttling), §20 (any 429-triggered error).
+
+Implementation pattern (pseudo):
+```sh
+attempt=0
+total_wait=0
+while [ $attempt -lt 10 ] && [ $total_wait -lt 300 ]; do
+  response=$($CALL)
+  status=$(echo "$response" | extract_status)
+  if [ "$status" != "429" ]; then echo "$response"; exit 0; fi
+  retry_after=$(echo "$response" | extract_header "Retry-After")
+  if [ -n "$retry_after" ]; then
+    sleep "$retry_after"; total_wait=$((total_wait + retry_after))
+  else
+    backoff=$(( (1 << attempt) > 60 ? 60 : (1 << attempt) ))
+    sleep "$backoff"; total_wait=$((total_wait + backoff))
+  fi
+  attempt=$((attempt + 1))
+done
+exit 1
+```
+
+### 27.3) Project creation propagation polling
+
+In addition to the four named helpers, §21 uses a Firebase-specific polling check:
+
+#### `poll_firebase_project_exists(project_id, timeout=60, interval=5)`
+
+After `firebase projects:create <project_id>`, poll `firebase projects:list --json` until `<project_id>` appears in the output. This handles the 10–30 second propagation delay between project creation and the project being usable for `firebase use --add`.
+
+- **Default timeout:** 60 seconds.
+- **Default interval:** 5 seconds.
+- **Used by:** §21.
+
+### 27.4) Polling and the error mitigation loop
+
+Every polling helper that times out surfaces to §20 with:
+- `category: polling`
+- `severity: high` (timeout) or `severity: medium` (recovered after retry)
+- `root_cause`: the specific external state that didn't settle (e.g. "Firebase Hosting CDN did not serve 200 for `<url>` within 300s")
+- `mitigation_rule`: typically extends the timeout for the offending operation OR investigates an underlying infrastructure issue
+
+Recurring polling timeouts on the same operation (≥2× across runs) get promoted to constraints — for example, a constraint adjusting the default `poll_until_http_ok` timeout for slow regional Firebase deployments.
+
+### 27.5) Polling and autopilot
+
+All polling is autonomous. Autopilot does not pause on polling waits — the run continues silently until either success or timeout. On timeout, autopilot surfaces the failure and either retries the surrounding action (if §20's mitigation rule says to) or BLOCKs (if the operation is critical and the timeout indicates real failure).
+
+### 27.6) Why this section exists
+
+Without polling discipline, the most common failure mode in a multi-tool autonomous run is **intermittent flakiness from race conditions** — emulators not yet listening, deploys not yet propagated, CI not yet started, rate limits hit on a retry storm. These failures are invisible at design time and infuriating at runtime. Codifying polling as a named pattern with named helpers and named timeouts turns "the run sometimes fails for no obvious reason" into "the run waited 300 seconds for the deploy to propagate and the propagation did not complete, which is a real signal."
+
+---
+
 ## Short embed version
 
-**Autonomous Project Research-to-Completion Skill (v1.5.0, consolidated single-skill):**
-Take an initial project idea → clarify only needed information → detect project type and scope → research only project-specific requirements **including cost analysis under a free-tier-first stance** → **default to Firebase + React + React Context unless overridden** → **inventory all tools / materials / assets / APIs / libraries / configs / credentials / permissions / dependencies and classify every item as HAVE / NEED / GAP before any planning begins** → produce a Resource Manifest **and a Cost Manifest** → emit a one-page **plan preview** with one approval moment → organize broader findings into HAVE / NEED / GAPS → convert to a phased workflow from simple to complex (test-first within each code-mutating phase) → **scaffold smoke specs and MSW handlers during build, push per-phase PRs to a private GitHub repo with branch protection** → run **§9 emulator smoke** → run the **seven-layer security gate** (identity, session, roles, abuse protection, credential hygiene, general security audit, connectivity audit) → deploy through the correct Firebase environment only after all checks pass → final report includes a PR Queue for human review (the agent never auto-merges). Throughout: autonomously capture errors and distill constraints (§20), bootstrap Firebase CLI and project (§21), locate and reference-wire Anthropic API key from local files (§22), fan out independent subtasks to parallel sub-agents under a diminishing-returns cap (§23), checkpoint run state for resumability (§24), and bootstrap GitHub with per-phase PRs (§26). Single skill. Truly autonomous on activation, with one human approval at plan-time and PRs as the team review checkpoint.
+**Autonomous Project Research-to-Completion Skill (v1.6.0, consolidated single-skill):**
+Take an initial project idea → clarify only needed information → detect project type and scope → research only project-specific requirements **including cost analysis under a free-tier-first stance** → **default to Firebase + React + React Context unless overridden** → **inventory all tools / materials / assets / APIs / libraries / configs / credentials / permissions / dependencies and classify every item as HAVE / NEED / GAP before any planning begins** → produce a Resource Manifest **and a Cost Manifest** → emit a one-page **plan preview** with one approval moment → organize broader findings into HAVE / NEED / GAPS → convert to a phased workflow from simple to complex (test-first within each code-mutating phase) → **scaffold smoke specs and MSW handlers during build, push per-phase PRs to a private GitHub repo with branch protection** → **run §9 emulator smoke with port-open polling** → run the **seven-layer security gate** (identity, session, roles, abuse protection, credential hygiene, general security audit, connectivity audit) → deploy through the correct Firebase environment only after all checks pass → **verify deploy via HTTP polling against the deployed URL before declaring success** → final report includes a PR Queue with real CI status (polled at end of run) for human review (the agent never auto-merges). Throughout: autonomously capture errors and distill constraints (§20), bootstrap Firebase CLI and project with creation-propagation polling (§21), locate and reference-wire Anthropic API key from local files (§22), fan out independent subtasks to parallel sub-agents under a diminishing-returns cap with 429 backoff polling (§23), checkpoint run state for resumability (§24), bootstrap GitHub with per-phase PRs (§26), and apply polling discipline throughout (§27 — four named helpers: `poll_until_http_ok`, `poll_until_port_open`, `poll_pr_checks`, `poll_with_backoff_on_429`). Single skill. Truly autonomous on activation, with one human approval at plan-time and PRs as the team review checkpoint.
